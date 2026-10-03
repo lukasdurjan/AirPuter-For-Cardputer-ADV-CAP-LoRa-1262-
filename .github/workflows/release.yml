@@ -1,0 +1,50 @@
+name: Build and Release AirPuter
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build AirPuter
+        run: pio run
+
+      - name: Find firmware and rename it
+        shell: bash
+        run: |
+          FIRMWARE=$(find .pio/build -name firmware.bin | head -n 1)
+
+          if [ -z "$FIRMWARE" ]; then
+            echo "firmware.bin not found!"
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME}"
+
+          cp "$FIRMWARE" "AirPuter-${VERSION}.bin"
+
+          echo "Created AirPuter-${VERSION}.bin"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AirPuter-${{ github.ref_name }}.bin
+          generate_release_notes: true
