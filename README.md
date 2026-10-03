@@ -1,5 +1,27 @@
 # AirPuter
 
+## Install the release binary
+
+1. Download **AirPuter.bin** from the [latest release](https://github.com/lukasdurjan/AirPuter-For-Cardputer-ADV-CAP-LoRa-1262-/releases/latest), or from [release/AirPuter.bin](release/AirPuter.bin) in this repository (use **Download raw file**). Every push to `main` automatically publishes a new versioned release.
+2. Install [Python](https://www.python.org/downloads/) and esptool:
+
+   ```bash
+   python -m pip install --upgrade esptool
+   ```
+
+3. Connect the Cardputer by USB using a data cable. Close any serial monitor. If it does not connect, hold **G0** while powering on/resetting the device to enter download mode.
+4. Flash the downloaded file. Replace `COM3` with your Cardputer's serial port (for example `/dev/ttyACM0` on Linux or `/dev/cu.usbmodem...` on macOS):
+
+   ```bash
+   python -m esptool --chip esp32s3 --port COM3 --baud 460800 write-flash 0x0 AirPuter.bin
+   ```
+
+5. Restart the Cardputer, then select your Wi-Fi network and enter its password on the device.
+
+**AirPuter.bin is a complete image** containing the bootloader, partition table, OTA initialization data, and application. Always flash it at **0x0**. Installation replaces the current firmware. The raw PlatformIO `firmware.bin` is only the application and cannot be installed using this command.
+
+See the [official esptool flashing documentation](https://docs.espressif.com/projects/esptool/en/latest/esp32s3/esptool/flashing-firmware.html) for connection troubleshooting.
+
 **Live aircraft tracker for the M5Stack Cardputer.**
 
 AirPuter shows nearby aircraft directly on the Cardputer display using live ADS-B data. It includes an interactive OpenStreetMap view, a lightweight outline map, a sortable flight list, aircraft details, and GPS support through the Cardputer LoRa/GPS CAP.
@@ -108,7 +130,25 @@ Map data © OpenStreetMap contributors. See `MAP_SOURCES.md` for map-source and 
 
 ## Release binary
 
-The release firmware is built for the `m5stack-cardputer` PlatformIO environment. Flashing requirements depend on the installer/flashing tool being used; keep the bootloader and partition layout consistent with the PlatformIO project.
+Every `pio run -e m5stack-cardputer` build also generates **release/AirPuter.bin**. This folder is tracked by Git, so you can push the ready-to-install binary together with the source:
+
+```bash
+pio run -e m5stack-cardputer
+git add release/AirPuter.bin
+git commit -m "Update release firmware"
+git push origin main
+```
+
+Commit any source changes together with the binary so they match. After every push to `main`, GitHub Actions builds the firmware, finds the highest existing `vMAJOR.MINOR.PATCH` tag, increases its patch number, and publishes a versioned GitHub Release with `AirPuter.bin`. For example, `v1.0.1` becomes `v1.0.2`. With no version tags, the first release is `v1.0.0`. The release tag points to the commit that was built. No manual tagging is needed.
+
+To choose a specific version instead (for example a new major or minor version), push a new version tag:
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+Use a new version number for each release. GitHub Actions attaches the complete `AirPuter.bin` image to the release; installation instructions are at the top of this README.
 
 ## Support
 

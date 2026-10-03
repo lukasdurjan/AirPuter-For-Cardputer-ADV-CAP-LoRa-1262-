@@ -1,50 +1,65 @@
-name: Build and Release AirPuter
+﻿name: Build and Release AirPuter
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: airputer-releases
+  cancel-in-progress: false
+
 jobs:
   build:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.11"
 
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Build AirPuter
-        run: pio run
+      - name: Build and package AirPuter
+        run: pio run -e m5stack-cardputer
 
-      - name: Find firmware and rename it
+      - name: Choose release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          FIRMWARE=$(find .pio/build -name firmware.bin | head -n 1)
-
-          if [ -z "$FIRMWARE" ]; then
-            echo "firmware.bin not found!"
-            exit 1
+          git fetch origin --tags
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION=$(git tag --points-at "$GITHUB_SHA" --list 'v*' | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -n 1 || true)
+            if [ -z "$VERSION" ]; then
+              VERSION=$(python tools/next_release_version.py)
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$VERSION" -f sha="$GITHUB_SHA"
+            fi
           fi
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release: $VERSION" >> "$GITHUB_STEP_SUMMARY"
 
-          VERSION="${GITHUB_REF_NAME}"
-
-          cp "$FIRMWARE" "AirPuter-${VERSION}.bin"
-
-          echo "Created AirPuter-${VERSION}.bin"
-
-      - name: Create GitHub Release
+      - name: Publish versioned release
         uses: softprops/action-gh-release@v2
         with:
-          files: AirPuter-${{ github.ref_name }}.bin
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: release/AirPuter.bin
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: false
+          make_latest: true
