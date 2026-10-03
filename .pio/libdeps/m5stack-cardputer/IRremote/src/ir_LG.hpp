@@ -1,0 +1,306 @@
+/*
+ * ir_LG.hpp
+ *
+ *  Contains functions for receiving and sending LG IR Protocol for air conditioner
+ *
+ *  This file is part of Arduino-IRremote https://github.com/Arduino-IRremote/Arduino-IRremote.
+ *
+ ************************************************************************************
+ * MIT License
+ *
+ * Copyright (c) 2017-2026 Darryl Smith, Armin Joachimsmeyer
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is furnished
+ * to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+ * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ ************************************************************************************
+ */
+#ifndef _IR_LG_HPP
+#define _IR_LG_HPP
+
+#include "LocalDebugLevelStart.h"
+
+/** \addtogroup Decoder Decoders and encoders for different protocols
+ * @{
+ */
+//==============================================================================
+//                               L       GGGG
+//                               L      G
+//                               L      G  GG
+//                               L      G   G
+//                               LLLLL   GGG
+//==============================================================================
+/*
+ * Protocol=LG Address=0xF1 Command=0x7776 Raw-Data=0xF17776B 28 bits MSB first
+ +8950,-4150
+ + 500,-1550 + 550,-1550 + 500,-1550 + 500,-1600
+ + 500,- 700 + 350,- 600 + 450,- 600 + 450,-1550
+ + 500,- 550 + 500,-1550 + 500,-1600 + 500,-1550
+ + 550,- 550 + 500,-1550 + 500,-1550 + 550,-1550
+ + 500,- 550 + 500,-1550 + 500,-1600 + 500,-1550
+ + 500,- 550 + 500,-1550 + 500,-1600 + 500,- 550
+ + 500,-1550 + 500,- 600 + 450,-1600 + 500,-1550
+ + 500
+ Sum: 62400
+ */
+
+// LG originally added by Darryl Smith
+// see: https://github.com/Arduino-IRremote/Arduino-IRremote/tree/master/examples/SendLGAirConditionerDemo
+// see: https://www.mikrocontroller.net/articles/IRMP_-_english#LGAIR
+// MSB first, 1 start bit + 8 bit address + 16 bit command + 4 bit checksum + 1 stop bit (28 data bits).
+//
+// LG is MSB first and has 28 bits in contrast to NEC, which is LSB first and has 32 bits.
+// LG Bit and repeat timing is like NEC, but with 526 us instead of 560 us unit.
+/*
+ * LG remote IR-LED measurements: Type AKB 73315611 for air conditioner, Ver1.1 from 2011.03.01
+ * Protocol: LG
+ * Internal crystal: 4 MHz
+ * Header:  8.9 ms mark 4.15 ms space
+ * Data:    526 / 526 and 526 / 1578;
+ * Clock is not synchronized with gate so you have 19 and sometimes 19 and a spike pulses for mark
+ * Duty:    9 us on 17 us off => around 33 % duty
+ * NO REPEAT: If value like temperature has changed during long press, the last value is send at button release.
+ * If you do a double press, the next value can be sent after around 118 ms. Tested with the fan button.
+
+ * LG remote IR-LED measurements: Type AKB 75095308 for LG TV
+ * Protocol: !!!NEC!!!
+ * Frequency 37.88 kHz
+ * Header:  9.0 ms mark 4.5 ms space
+ * Data:    560 / 560 and 560 / 1680;
+ * Clock is synchronized with gate, mark always starts with a full period
+ * Duty:    13 us on 13 us off => 50 % duty
+ * Repeat:  110 ms 9.0 ms mark, 2250 us space, 560 stop
+ * LSB first!
+ *
+ * The codes of the LG air conditioner are documented in https://github.com/Arduino-IRremote/Arduino-IRremote/blob/master/ac_LG.cpp
+ */
+#define LG_ADDRESS_BITS          8
+#define LG_COMMAND_BITS         16
+#define LG_CHECKSUM_BITS         4
+#define LG_BITS                 (LG_ADDRESS_BITS + LG_COMMAND_BITS + LG_CHECKSUM_BITS) // 28
+
+#define LG_UNIT                 526 // 20 periods of 38 kHz
+
+#define LG_HEADER_MARK          (16 * LG_UNIT) // 8416
+#define LG_HEADER_SPACE         (8 * LG_UNIT)  // 4208
+
+#define LG_BIT_MARK             LG_UNIT
+#define LG_ONE_SPACE            1578  // 60 periods of 38 kHz
+#define LG_ZERO_SPACE           550
+
+#define LG_REPEAT_HEADER_SPACE  (4 * LG_UNIT)  // 2104
+#define LG_REPEAT_PERIOD        110000 // Commands are repeated every 110 ms (measured from start to start) for as long as the key on the remote control is held down.
+//#define LG_AVERAGE_DURATION     58000 // LG_HEADER_MARK + LG_HEADER_SPACE  + 32 * 2,5 * LG_UNIT) + LG_UNIT // 2.5 because we assume more zeros than ones
+//#define LG_REPEAT_DURATION      (LG_HEADER_MARK  + LG_REPEAT_HEADER_SPACE + LG_BIT_MARK)
+//#define LG_REPEAT_DISTANCE      (LG_REPEAT_PERIOD - LG_AVERAGE_DURATION) // 52 ms
+
+struct PulseDistanceWidthProtocolConstants const LGProtocolConstants PROGMEM= {LG, LG_KHZ, LG_HEADER_MARK, LG_HEADER_SPACE, LG_BIT_MARK,
+    LG_ONE_SPACE, LG_BIT_MARK, LG_ZERO_SPACE, PROTOCOL_IS_MSB_FIRST | PROTOCOL_IS_PULSE_DISTANCE, (LG_REPEAT_PERIOD / MICROS_IN_ONE_MILLI), &sendLGSpecialRepeat};
+
+/************************************
+ * Start of send and decode functions
+ ************************************/
+/*
+ * Send special LG repeat. Like NEC repeat, but with unit 526 instead of 560 - not used internally
+ */
+void IRsend::sendLGRepeat() {
+    enableIROut (LG_KHZ);           // 38 kHz
+    mark(LG_HEADER_MARK);           // + 8416
+    space(LG_REPEAT_HEADER_SPACE);  // - 2104
+    mark(LG_BIT_MARK);              // + 500
+}
+
+/**
+ * Static function for sending special repeat frame.
+ * For use in ProtocolConstants. Saves up to 250 bytes compared to a member function.
+ */
+void sendLGSpecialRepeat() {
+    IrSender.enableIROut(LG_KHZ);           // 38 kHz
+    IrSender.mark(LG_HEADER_MARK);          // + 8416
+    IrSender.space(LG_REPEAT_HEADER_SPACE); // - 2104
+    IrSender.mark(LG_BIT_MARK);             // + 500
+}
+
+uint32_t IRsend::computeLGRawDataAndChecksum(uint8_t aAddress, uint16_t aCommand) {
+    uint32_t tRawData = ((uint32_t) aAddress << (LG_COMMAND_BITS + LG_CHECKSUM_BITS)) | ((uint32_t) aCommand << LG_CHECKSUM_BITS);
+    /*
+     * My guess of the 4 bit checksum
+     * Addition of all 4 nibbles of the 16 bit command
+     */
+    uint8_t tChecksum = 0;
+    uint16_t tTempForChecksum = aCommand;
+    for (int i = 0; i < 4; ++i) {
+        tChecksum += tTempForChecksum & 0xF; // add low nibble
+        tTempForChecksum >>= 4; // shift by a nibble
+    }
+    return (tRawData | (tChecksum & 0xF));
+}
+
+void IRsend::sendLG(uint8_t aAddress, uint16_t aCommand, int_fast8_t aNumberOfRepeats) {
+    sendPulseDistanceWidth_P(&LGProtocolConstants, computeLGRawDataAndChecksum(aAddress, aCommand), LG_BITS, aNumberOfRepeats);
+}
+
+/*
+ * Decode MSB first and 28 bits
+ */
+bool IRrecv::decodeLG() {
+    uint16_t tHeaderSpace = LG_HEADER_SPACE;
+
+    /*
+     * First check for right data length
+     * Next check start bit
+     * Next try the decode
+     */
+
+// Check we have the right amount of data (60). The +4 is for initial gap, start bit mark and space + stop bit mark.
+    if (!(decodedIRData.rawlen == ((2 * LG_BITS) + 4) || (decodedIRData.rawlen == 4))) {
+        // Is only printed, if LOCAL_DEBUG is defined globally
+        DEBUG_PRINT(F("LG: Data length="));
+        DEBUG_PRINT(decodedIRData.rawlen);
+        DEBUG_PRINTLN(F(" is not 60 or 4"));
+        return false;
+    }
+
+// Check header "mark" this must be done for repeat and data
+    if (!matchMark(irparams.rawbuf[1], LG_HEADER_MARK)) {
+        DEBUG_PRINTLN(F("LG: Header mark is wrong"));
+        return false;
+    }
+
+// Check for repeat - here we have another header space length
+    if (decodedIRData.rawlen == 4) {
+        if (lastDecodedProtocol == LG && matchSpace(irparams.rawbuf[2], LG_REPEAT_HEADER_SPACE)
+                && matchMark(irparams.rawbuf[3], LG_BIT_MARK)) {
+            decodedIRData.flags = IRDATA_FLAGS_IS_REPEAT | IRDATA_FLAGS_IS_MSB_FIRST;
+            decodedIRData.address = lastDecodedAddress;
+            decodedIRData.command = lastDecodedCommand;
+            decodedIRData.protocol = LG;
+            return true;
+        }
+        DEBUG_PRINTLN(F("LG: Repeat header space is wrong"));
+        return false;
+    }
+
+// Check command header space
+    if (!matchSpace(irparams.rawbuf[2], tHeaderSpace)) {
+        DEBUG_PRINTLN(F("LG: Header space length is wrong"));
+        return false;
+    }
+
+    decodePulseDistanceWidthData_P(&LGProtocolConstants, LG_BITS);
+
+// Success
+    decodedIRData.flags = IRDATA_FLAGS_IS_MSB_FIRST;
+    decodedIRData.command = (decodedIRData.decodedRawData >> LG_CHECKSUM_BITS) & 0xFFFF;
+    decodedIRData.address = decodedIRData.decodedRawData >> (LG_COMMAND_BITS + LG_CHECKSUM_BITS); // first 8 bit
+
+    /*
+     * My guess of the checksum
+     */
+    uint8_t tChecksum = 0;
+    uint16_t tTempForChecksum = decodedIRData.command;
+    for (int i = 0; i < 4; ++i) {
+        tChecksum += tTempForChecksum & 0xF; // add low nibble
+        tTempForChecksum >>= 4; // shift by a nibble
+    }
+// Checksum check
+    if ((tChecksum & 0xF) != (decodedIRData.decodedRawData & 0xF)) {
+
+        DEBUG_PRINT(F("LG: 4 bit checksum is not correct. expected=0x"));
+        DEBUG_PRINT(tChecksum, HEX);
+        DEBUG_PRINT(F(" received=0x"));
+        DEBUG_PRINT((decodedIRData.decodedRawData & 0xF), HEX);
+        DEBUG_PRINT(F(" data=0x"));
+        DEBUG_PRINTLN(decodedIRData.command, HEX);
+
+        decodedIRData.flags |= IRDATA_FLAGS_PARITY_FAILED;
+    }
+
+    decodedIRData.protocol = LG;
+    decodedIRData.numberOfBits = LG_BITS;
+
+    return true;
+}
+
+/*********************************************************************************
+ * Old deprecated functions, kept for backward compatibility to old 2.0 tutorials
+ *********************************************************************************/
+
+/**
+ * Here you can put your raw data, even one with "wrong" checksum.
+ * @param aRawData  The lowest 28 (LG_BITS) bit of this value are sent MSB first.
+ * @param aNumberOfRepeats If < 0 then only a special repeat frame will be sent.
+ */
+void IRsend::sendLGRaw(uint32_t aRawData, int_fast8_t aNumberOfRepeats) {
+    sendPulseDistanceWidth_P(&LGProtocolConstants, aRawData, LG_BITS, aNumberOfRepeats);
+}
+
+bool IRrecv::decodeLGMSB(decode_results *aResults) {
+    unsigned int offset = 1; // Skip first space
+
+// Check we have enough data (60) - +4 for initial gap, start bit mark and space + stop bit mark
+    if (aResults->rawlen != (2 * LG_BITS) + 4) {
+        return false;
+    }
+
+// Initial mark/space
+    if (!matchMark(aResults->rawbuf[offset], LG_HEADER_MARK)) {
+        return false;
+    }
+    offset++;
+
+    if (!matchSpace(aResults->rawbuf[offset], LG_HEADER_SPACE)) {
+        return false;
+    }
+    offset++;
+
+    decodePulseDistanceWidthData(LG_BITS, offset, LG_BIT_MARK, LG_ONE_SPACE, 0, PROTOCOL_IS_MSB_FIRST);
+
+// Stop bit
+    if (!matchMark(aResults->rawbuf[offset + (2 * LG_BITS)], LG_BIT_MARK)) {
+        DEBUG_PRINTLN(F("Stop bit mark length is wrong"));
+        return false;
+    }
+
+// Success
+    aResults->value = decodedIRData.decodedRawData;
+    aResults->bits = LG_BITS;
+    aResults->decode_type = LG;
+    decodedIRData.protocol = LG;
+    return true;
+}
+
+//+=============================================================================
+void IRsend::sendLG(unsigned long data, int nbits) {
+// Set IR carrier frequency
+    enableIROut (LG_KHZ);
+#if !(defined(__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__) || defined(__AVR_ATtiny87__) || defined(__AVR_ATtiny167__))
+    DEBUG_PRINTLN(
+            F( "The function sendLG(data, nbits) is deprecated and may not work as expected! Use sendLGRaw(data, NumberOfRepeats) or better sendLG(Address, Command, NumberOfRepeats)."));
+#endif
+// Header
+    mark(LG_HEADER_MARK);
+    space(LG_HEADER_SPACE);
+
+// Data + stop bit
+    sendPulseDistanceWidthData(LG_BIT_MARK, LG_ONE_SPACE, LG_BIT_MARK, LG_ZERO_SPACE, data, nbits, PROTOCOL_IS_MSB_FIRST);
+}
+
+/** @}*/
+#include "LocalDebugLevelEnd.h"
+
+#endif // _IR_LG_HPP
