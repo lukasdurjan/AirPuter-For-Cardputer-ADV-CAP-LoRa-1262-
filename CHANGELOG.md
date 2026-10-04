@@ -2,6 +2,7 @@
 
 ## 2026-10-04
 
+- Temporarily removed the experimental ATC audio streaming feature and its settings to restore firmware stability.
 - Fixed silent ATC playback by initializing the M5Cardputer speaker before starting the decoder task.
 - Added HTTPS and redirect support for custom ATC streams such as dynamic `d.liveatc.net` MP3 endpoints.
 - Added persistent custom ATC MP3/Icecast playback, Settings controls for ATC On/Off and source URL, plus W/A volume control. No third-party streams are bundled.

@@ -6,15 +6,11 @@
 #include <TinyGPS++.h>
 #include <Preferences.h>
 #include <algorithm>
-#include <AudioGeneratorMP3.h>
-#include <atomic>
 #include "online_map.h"
 #include "outline_map.h"
 #include "flight_data.h"
 #include "wifi_control.h"
 #include "ui_state.h"
-#include "audio_output_m5.h"
-#include "audio_file_source_secure.h"
 #include "generated_version.h"
 
 extern const char* WIFI_SSID;
@@ -69,7 +65,6 @@ portMUX_TYPE resultMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE viewMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE routeMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE photoMux = portMUX_INITIALIZER_UNLOCKED;
-portMUX_TYPE atcMux = portMUX_INITIALIZER_UNLOCKED;
 Position gpsPosition, observerPosition, viewPosition;
 Position aircraftRequestCenter;
 MapProjection::View projection(HOME_LAT, HOME_LON, 50);
@@ -92,12 +87,6 @@ char trackedSquawkHex[9] = {};
 uint16_t autoDimSeconds = 30;
 uint32_t lastInputAt = 0;
 bool displayDimmed = false;
-bool atcEnabled = false;
-uint8_t atcVolume = 96;
-char atcUrl[193] = {}, atcUrlEdit[193] = {};
-std::atomic<uint32_t> atcGeneration {0};
-char atcStatus[32] = "Off";
-TaskHandle_t atcHandle = nullptr;
 bool settingsReady = false;
 Preferences settings;
 
@@ -121,63 +110,6 @@ WifiControl::Snapshot wifiView;
 WifiControl::Network chosenNetwork;
 char wifiPassword[65] = {}, wifiMessage[64] = {};
 uint32_t pendingConnectionId = 0;
-AudioOutputM5 atcOutput(&M5Cardputer.Speaker);
-
-void atcTask(void*)
-{
-    uint32_t activeGeneration = UINT32_MAX;
-    uint32_t lastRetry = 0;
-    AudioFileSourceSecure* source = nullptr;
-    AudioGeneratorMP3* decoder = nullptr;
-    for (;;)
-    {
-        uint32_t generation = atcGeneration.load();
-        if (generation != activeGeneration)
-        {
-            activeGeneration = generation;
-            if (decoder) { decoder->stop(); delete decoder; decoder = nullptr; }
-            if (source) { source->close(); delete source; source = nullptr; }
-            atcOutput.stop();
-            char url[sizeof(atcUrl)]; bool enabled;
-            portENTER_CRITICAL(&atcMux);
-            enabled = atcEnabled; strlcpy(url, atcUrl, sizeof(url));
-            portEXIT_CRITICAL(&atcMux);
-            if (enabled && url[0] && WiFi.status() == WL_CONNECTED)
-            {
-                strlcpy(atcStatus, "Connecting...", sizeof(atcStatus));
-                source = new AudioFileSourceSecure(url);
-                decoder = new AudioGeneratorMP3();
-                if (source->isOpen() && decoder->begin(source, &atcOutput))
-                    strlcpy(atcStatus, "Playing", sizeof(atcStatus));
-                else
-                {
-                    if (decoder) { delete decoder; decoder = nullptr; }
-                    if (source) { source->close(); delete source; source = nullptr; }
-                    strlcpy(atcStatus, "Stream unavailable", sizeof(atcStatus));
-                }
-            }
-            else strlcpy(atcStatus, enabled ? "Set source / WiFi" : "Off", sizeof(atcStatus));
-        }
-        if (decoder && decoder->isRunning())
-        {
-            if (!decoder->loop())
-            {
-                decoder->stop(); delete decoder; decoder = nullptr;
-                source->close(); delete source; source = nullptr;
-                strlcpy(atcStatus, "Stream ended", sizeof(atcStatus));
-            }
-        }
-        else
-        {
-            if (millis() - lastRetry >= 10000)
-            { lastRetry = millis(); activeGeneration = UINT32_MAX; }
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-    }
-}
-
-void restartAtc() { ++atcGeneration; }
-
 lgfx::LovyanGFX& screen()
 {
     if (canvasReady) return canvas;
@@ -900,28 +832,16 @@ void drawMenuScreen()
     char dimText[24];
     if (autoDimSeconds) snprintf(dimText, sizeof(dimText), "Auto Dim: %us", autoDimSeconds);
     else strlcpy(dimText, "Auto Dim: Off", sizeof(dimText));
-    char atcText[28]; snprintf(atcText, sizeof(atcText), "ATC: %s", atcEnabled ? "On" : "Off");
     const char* items[] = {outlineMode ? "Map: Outline" : "Map: Tiles", "Wi-Fi networks", "Center on GPS",
-                           dimText, atcText, "ATC Source", "Back"};
-    int first = menuIndex < 5 ? 0 : menuIndex - 4;
-    for (int i = first; i < min(first + 5, 7); ++i)
+                           dimText, "Back"};
+    int first = 0;
+    for (int i = first; i < 5; ++i)
     {
         int y = 21 + (i - first) * 20; uint16_t bg = i == menuIndex ? 0x2104 : BLACK;
         d.fillRect(0, y - 3, 240, 18, bg); d.setTextColor(i == menuIndex ? YELLOW : WHITE, bg);
         d.setCursor(7, y); d.print(items[i]);
     }
     drawFooter("Arrows/Enter  Opt/Esc:back");
-}
-
-void drawAtcSource()
-{
-    auto& d = screen(); drawHeader("ATC SOURCE URL");
-    d.setTextColor(WHITE, BLACK); d.setCursor(5, 22);
-    drawScrollingText(atcUrlEdit[0] ? atcUrlEdit : "Enter MP3/Icecast URL", 5, 22, 230, true);
-    d.setTextColor(LIGHTGREY, BLACK); d.setCursor(5, 49); d.print("Custom licensed stream");
-    d.setCursor(5, 65); d.printf("Volume: %u  W:+ A:-", atcVolume);
-    d.setTextColor(atcEnabled ? GREEN : DARKGREY, BLACK); d.setCursor(5, 83); d.printf("Status: %.25s", atcStatus);
-    drawFooter("Enter:save Fn+Esc:cancel");
 }
 
 void drawWifiList()
@@ -978,7 +898,6 @@ void drawUI()
         case UiScreen::Squawk7500: drawSquawk7500Screen(); break;
         case UiScreen::Detail: drawDetailScreen(); break;
         case UiScreen::Menu: drawMenuScreen(); break;
-        case UiScreen::AtcSource: drawAtcSource(); break;
         case UiScreen::WifiList: drawWifiList(); break;
         case UiScreen::WifiPassword: drawWifiPassword(); break;
         case UiScreen::WifiConnecting: drawWifiConnecting(); break;
@@ -1070,17 +989,6 @@ void activateMenuItem()
         if (settingsReady) settings.putUShort("autodim", autoDimSeconds);
         lastInputAt = millis();
     }
-    else if (menuIndex == 4)
-    {
-        atcEnabled = !atcEnabled;
-        if (settingsReady) settings.putBool("atc-on", atcEnabled);
-        restartAtc();
-    }
-    else if (menuIndex == 5)
-    {
-        strlcpy(atcUrlEdit, atcUrl, sizeof(atcUrlEdit));
-        uiScreen = UiScreen::AtcSource;
-    }
     else uiScreen = menuReturn;
 }
 
@@ -1088,7 +996,6 @@ struct KeyEvents {
     bool up = false, down = false, left = false, right = false;
     bool tab = false, opt = false, enter = false, escape = false, backspace = false;
     bool zoomIn = false, zoomOut = false, rescan = false;
-    bool volumeUp = false, volumeDown = false;
     char text[57] = {};
 };
 
@@ -1105,7 +1012,7 @@ KeyEvents readKeys()
     int characters = 0;
     uint8_t directions = 0;
     bool passwordScreen = uiScreen == UiScreen::WifiPassword;
-    bool textInputScreen = passwordScreen || uiScreen == UiScreen::AtcSource;
+    bool textInputScreen = passwordScreen;
     for (const auto& point : keyboard.keyList())
     {
         uint8_t raw = keyboard.getKeyValue(point).value_first;
@@ -1127,8 +1034,6 @@ KeyEvents readKeys()
             if (raw == 'i') events.zoomIn = true;
             if (raw == 'o') events.zoomOut = true;
             if (raw == 'r') events.rescan = true;
-            if (!textInputScreen && raw == 'w') events.volumeUp = true;
-            if (!textInputScreen && raw == 'a') events.volumeDown = true;
         }
     }
     bool repeat = false;
@@ -1142,16 +1047,10 @@ KeyEvents readKeys()
 bool handleKeys(const KeyEvents& k)
 {
     bool changed = k.up || k.down || k.left || k.right || k.tab || k.opt || k.enter || k.escape ||
-                   k.zoomIn || k.zoomOut || k.rescan || k.volumeUp || k.volumeDown || k.backspace || k.text[0];
+                   k.zoomIn || k.zoomOut || k.rescan || k.backspace || k.text[0];
     if (!changed) return false;
     lastInputAt = millis();
     if (displayDimmed) { M5Cardputer.Display.setBrightness(128); displayDimmed = false; }
-    if (k.volumeUp || k.volumeDown)
-    {
-        int next = constrain(int(atcVolume) + (k.volumeUp ? 16 : -16), 0, 255);
-        atcVolume = uint8_t(next); M5Cardputer.Speaker.setVolume(atcVolume);
-        if (settingsReady) settings.putUChar("atc-vol", atcVolume);
-    }
     if (k.opt)
     {
         if (uiScreen == UiScreen::Menu) uiScreen = menuReturn;
@@ -1183,20 +1082,6 @@ bool handleKeys(const KeyEvents& k)
         {
             if (!n) strlcpy(wifiMessage, "Enter password first", sizeof(wifiMessage));
             else startWifiConnection();
-        }
-        return true;
-    }
-    if (uiScreen == UiScreen::AtcSource)
-    {
-        size_t n = strlen(atcUrlEdit);
-        if (k.backspace && n) atcUrlEdit[--n] = '\0';
-        for (const char* c = k.text; *c && n < sizeof(atcUrlEdit) - 1; ++c) atcUrlEdit[n++] = *c;
-        atcUrlEdit[n] = '\0';
-        if (k.enter)
-        {
-            portENTER_CRITICAL(&atcMux); strlcpy(atcUrl, atcUrlEdit, sizeof(atcUrl)); portEXIT_CRITICAL(&atcMux);
-            if (settingsReady) settings.putString("atc-url", atcUrl);
-            uiScreen = UiScreen::Menu; restartAtc();
         }
         return true;
     }
@@ -1245,8 +1130,8 @@ bool handleKeys(const KeyEvents& k)
     }
     else if (uiScreen == UiScreen::Menu)
     {
-        menuIndex = constrain(menuIndex + (k.down - k.up), 0, 6);
-        if (k.enter || ((k.left || k.right) && (menuIndex == 0 || menuIndex == 3 || menuIndex == 4))) activateMenuItem();
+        menuIndex = constrain(menuIndex + (k.down - k.up), 0, 4);
+        if (k.enter || ((k.left || k.right) && (menuIndex == 0 || menuIndex == 3))) activateMenuItem();
     }
     else if (uiScreen == UiScreen::WifiList)
     {
@@ -1295,14 +1180,8 @@ void setup()
         autoDimSeconds = settings.getUShort("autodim", 30);
         if (autoDimSeconds != 30 && autoDimSeconds != 60 && autoDimSeconds != 120 && autoDimSeconds != 0)
             autoDimSeconds = 30;
-        atcEnabled = settings.getBool("atc-on", false);
-        atcVolume = settings.getUChar("atc-vol", 96);
-        String savedAtcUrl = settings.getString("atc-url", "");
-        strlcpy(atcUrl, savedAtcUrl.c_str(), sizeof(atcUrl));
     }
     M5Cardputer.Display.setBrightness(128); lastInputAt = millis();
-    bool speakerReady = M5Cardputer.Speaker.begin();
-    M5Cardputer.Speaker.setVolume(atcVolume); atcOutput.setup();
     OnlineMap::begin(); OnlineMap::request(viewPosition.lat, viewPosition.lon, radiusNM);
     OnlineMap::setEnabled(!outlineMode);
     gpsSerial.setRxBufferSize(2048); gpsSerial.begin(115200, SERIAL_8N1, GPS_RX_PIN, -1);
@@ -1310,11 +1189,6 @@ void setup()
         Serial.println("GPS task failed; using Poprad");
     if (xTaskCreate(networkTask, "ADSB network", 12288, nullptr, 1, &networkHandle) != pdPASS)
         strlcpy(statusText, "Network task failed", sizeof(statusText));
-    if (!speakerReady)
-        strlcpy(atcStatus, "Speaker failed", sizeof(atcStatus));
-    else if (xTaskCreatePinnedToCore(atcTask, "ATC audio", 8192, nullptr, 1, &atcHandle, 0) != pdPASS)
-        strlcpy(atcStatus, "Audio task failed", sizeof(atcStatus));
-    else restartAtc();
     drawUI();
 }
 
