@@ -1301,6 +1301,7 @@ void setup()
         strlcpy(atcUrl, savedAtcUrl.c_str(), sizeof(atcUrl));
     }
     M5Cardputer.Display.setBrightness(128); lastInputAt = millis();
+    bool speakerReady = M5Cardputer.Speaker.begin();
     M5Cardputer.Speaker.setVolume(atcVolume); atcOutput.setup();
     OnlineMap::begin(); OnlineMap::request(viewPosition.lat, viewPosition.lon, radiusNM);
     OnlineMap::setEnabled(!outlineMode);
@@ -1309,7 +1310,9 @@ void setup()
         Serial.println("GPS task failed; using Poprad");
     if (xTaskCreate(networkTask, "ADSB network", 12288, nullptr, 1, &networkHandle) != pdPASS)
         strlcpy(statusText, "Network task failed", sizeof(statusText));
-    if (xTaskCreatePinnedToCore(atcTask, "ATC audio", 8192, nullptr, 1, &atcHandle, 0) != pdPASS)
+    if (!speakerReady)
+        strlcpy(atcStatus, "Speaker failed", sizeof(atcStatus));
+    else if (xTaskCreatePinnedToCore(atcTask, "ATC audio", 8192, nullptr, 1, &atcHandle, 0) != pdPASS)
         strlcpy(atcStatus, "Audio task failed", sizeof(atcStatus));
     else restartAtc();
     drawUI();

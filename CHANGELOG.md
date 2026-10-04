@@ -2,6 +2,7 @@
 
 ## 2026-10-04
 
+- Fixed silent ATC playback by initializing the M5Cardputer speaker before starting the decoder task.
 - Added HTTPS and redirect support for custom ATC streams such as dynamic `d.liveatc.net` MP3 endpoints.
 - Added persistent custom ATC MP3/Icecast playback, Settings controls for ATC On/Off and source URL, plus W/A volume control. No third-party streams are bundled.
 - Added selectable SQUAWK7500 aircraft tracking that keeps the map centred on the chosen aircraft until Esc returns to GPS.
