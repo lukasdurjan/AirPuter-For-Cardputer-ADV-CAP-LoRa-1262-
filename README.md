@@ -145,7 +145,9 @@ git commit -m "Update release firmware"
 git push origin main
 ```
 
-Commit any source changes together with the binary so they match. After every push to `main`, GitHub Actions builds the firmware, finds the highest existing `vMAJOR.MINOR.PATCH` tag, increases its patch number, and publishes a versioned GitHub Release with `AirPuter.bin`. For example, `v1.0.1` becomes `v1.0.2`. With no version tags, the first release is `v1.0.0`. The release tag points to the commit that was built. No manual tagging is needed.
+After every push to `main`, GitHub Actions builds the firmware, finds the highest existing `vMAJOR.MINOR.PATCH` tag and increases its patch number. For example, `v1.0.1` becomes `v1.0.2`. The workflow embeds that version in the firmware, commits the generated `release/AirPuter.bin` and version header back to `main`, creates the matching tag, and uploads the BIN as the newest GitHub Release. With no version tags, the first release is `v1.0.0`. No manual tagging or binary commit is needed.
+
+The repository must allow GitHub Actions to write repository contents. This is configured under **Settings → Actions → General → Workflow permissions → Read and write permissions**. A protected `main` branch must also allow the GitHub Actions bot to push the generated binary commit.
 
 To choose a specific version instead (for example a new major or minor version), push a new version tag:
 

@@ -11,6 +11,7 @@
 #include "flight_data.h"
 #include "wifi_control.h"
 #include "ui_state.h"
+#include "generated_version.h"
 
 extern const char* WIFI_SSID;
 extern const char* WIFI_PASS;
@@ -21,7 +22,7 @@ constexpr size_t MAX_PHOTO_BYTES = 45000;
 constexpr int ZOOM_RADII[] = {5, 10, 25, 50, 100, 200};
 constexpr char API_USER_AGENT[] = "AirPuter/1.0";
 constexpr char PHOTO_USER_AGENT[] = "AirPuter/1.0 (+https://ko-fi.com/lukaslukee)";
-constexpr char FIRMWARE_VERSION[] = "AirPuter 1.6 startup splash";
+constexpr char FIRMWARE_VERSION[] = "AirPuter " AIRPUTER_VERSION;
 int zoomIndex = 3, radiusNM = 50;
 
 struct NetworkResult {
@@ -368,7 +369,9 @@ bool downloadPhoto(const PhotoRequest& request, PhotoResult& result, uint8_t* da
         strlcpy(result.error, "No photo available", sizeof(result.error));
         lookup.end(); return true;
     }
-    String url(imageUrl);
+    // PlaneSpotters thumbnails are progressive JPEGs (SOF2), unsupported by the
+    // lightweight M5GFX JPEG decoder. Request an equivalent 200 px baseline JPEG.
+    String url = "https://wsrv.nl/?url=" + String(imageUrl) + "&w=200&output=jpg";
     lookup.end();
 
     HTTPClient image;
@@ -391,6 +394,9 @@ bool downloadPhoto(const PhotoRequest& request, PhotoResult& result, uint8_t* da
     image.end();
     if (received != size_t(length))
     { strlcpy(result.error, "Incomplete photo", sizeof(result.error)); return false; }
+    if (received < 4 || data[0] != 0xFF || data[1] != 0xD8 ||
+        data[received - 2] != 0xFF || data[received - 1] != 0xD9)
+    { strlcpy(result.error, "Invalid JPEG data", sizeof(result.error)); return false; }
     result.size = received;
     result.success = result.found = true;
     return true;

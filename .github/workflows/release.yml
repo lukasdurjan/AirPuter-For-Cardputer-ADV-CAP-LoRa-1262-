@@ -1,0 +1,83 @@
+name: Build and publish firmware
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "release/AirPuter.bin"
+      - "include/generated_version.h"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: airputer-release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Select next patch version
+        id: version
+        shell: bash
+        run: |
+          git fetch --force --tags
+          version="$(python tools/next_release_version.py)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cat > include/generated_version.h <<EOF
+          #pragma once
+
+          // Updated automatically by the release workflow. Keep the v-prefix so this
+          // value matches the Git tag and the name shown in GitHub Releases.
+          #define AIRPUTER_VERSION "$version"
+          EOF
+
+      - name: Build complete flash image
+        run: pio run -e m5stack-cardputer
+
+      - name: Commit generated version and binary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          test -s release/AirPuter.bin
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add include/generated_version.h release/AirPuter.bin
+          git commit -m "Release $VERSION [skip ci]"
+          git push origin HEAD:main
+
+      - name: Create version tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "$VERSION"
+          git push origin "$VERSION"
+
+      - name: Publish as latest GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >-
+          gh release create "$VERSION" release/AirPuter.bin
+          --title "AirPuter $VERSION"
+          --generate-notes
+          --latest
+
