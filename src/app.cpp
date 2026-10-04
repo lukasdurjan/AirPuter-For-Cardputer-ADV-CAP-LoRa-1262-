@@ -671,6 +671,13 @@ void drawMapScreen()
     d.clearClipRect(); d.setTextColor(WHITE, BLACK);
     if (outlineMode) { d.setCursor(80, 126); d.print("NE / (c) GeoNames"); }
     else { d.setCursor(58, 126); d.print("(c) OpenStreetMap contributors"); }
+
+    if (!outlineMode && OnlineMap::status()[0])
+    {
+        d.fillRect(54, 111, 132, 12, BLACK);
+        d.setTextColor(YELLOW, BLACK);
+        d.setCursor(60, 113); d.printf("%.20s", OnlineMap::status());
+    }
 }
 
 void drawListScreen()

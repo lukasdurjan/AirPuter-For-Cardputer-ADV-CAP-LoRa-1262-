@@ -357,6 +357,25 @@ void draw(lgfx::LovyanGFX& display)
                    view.radius != drawnRadius || view.zoom != drawnZoom;
     if (changed && cacheReady && backgroundReady && xSemaphoreTake(fsMutex, 0) == pdTRUE)
     {
+        bool targetHasTile = false;
+        for (int row = view.firstY; row <= view.lastY && !targetHasTile; ++row)
+            for (int col = view.firstX; col <= view.lastX; ++col)
+            {
+                TileKey key {view.zoom, view.tileX(col), row};
+                if (validCache(key, readMetadata(key)))
+                { targetHasTile = true; break; }
+            }
+
+        // A GPS fix can move the view hundreds of kilometres in one update.
+        // Keep the last complete background until the first tile for the new
+        // location is ready instead of replacing it with an empty canvas.
+        if (!targetHasTile && drawnVersion != UINT32_MAX)
+        {
+            strlcpy(drawnStatus, "Loading GPS map...", sizeof(drawnStatus));
+            xSemaphoreGive(fsMutex);
+        }
+        else
+        {
         background.fillScreen(0xE71C);
         visibleTiles = 0;
         retryDecode = false;
@@ -383,6 +402,7 @@ void draw(lgfx::LovyanGFX& display)
         drawnRadius = view.radius; drawnZoom = view.zoom;
         strlcpy(drawnStatus, visibleTiles ? "" : "Map waiting for data", sizeof(drawnStatus));
         xSemaphoreGive(fsMutex);
+        }
     }
     if (backgroundReady && drawnVersion != UINT32_MAX)
         background.pushSprite(&display, 0, MapProjection::TOP);
