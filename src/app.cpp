@@ -82,6 +82,8 @@ uint8_t photoData[MAX_PHOTO_BYTES] = {};
 char statusText[64] = "Connecting WiFi";
 M5Canvas canvas(&M5Cardputer.Display);
 bool canvasReady = false, followGPS = true, outlineMode = false;
+bool trackingSquawk7500 = false, trackedSquawkLive = false;
+char trackedSquawkHex[9] = {};
 uint16_t autoDimSeconds = 30;
 uint32_t lastInputAt = 0;
 bool displayDimmed = false;
@@ -463,7 +465,7 @@ void networkTask(void*)
             inbox = result; ++inboxVersion;
             portEXIT_CRITICAL(&resultMux);
         }
-        bool showSquawk = uiScreen == UiScreen::Squawk7500;
+        bool showSquawk = uiScreen == UiScreen::Squawk7500 || trackingSquawk7500;
         if (showSquawk && (!squawkAttempted || millis() - lastSquawkAttempt >= REFRESH_MS))
         {
             lastSquawkAttempt = millis(); squawkAttempted = true;
@@ -531,7 +533,21 @@ bool applySquawkResult()
     { result = squawkInbox; squawkAppliedVersion = squawkInboxVersion; changed = true; }
     portEXIT_CRITICAL(&resultMux);
     if (changed && result.success)
-    { squawkRadar = result; squawkLastSuccess = millis(); squawkSelectedRow = constrain(squawkSelectedRow, 0, max(0, squawkRadar.count - 1)); }
+    {
+        squawkRadar = result; squawkLastSuccess = millis();
+        squawkSelectedRow = constrain(squawkSelectedRow, 0, max(0, squawkRadar.count - 1));
+        trackedSquawkLive = false;
+        if (trackingSquawk7500)
+            for (int i = 0; i < squawkRadar.count; ++i)
+                if (strcmp(squawkRadar.aircraft[i].hex, trackedSquawkHex) == 0)
+                {
+                    viewPosition.lat = squawkRadar.aircraft[i].lat;
+                    viewPosition.lon = squawkRadar.aircraft[i].lon;
+                    viewPosition.fromGPS = false;
+                    trackedSquawkLive = true;
+                    break;
+                }
+    }
     return changed;
 }
 
@@ -659,9 +675,26 @@ void drawMapScreen()
         if (p.flight[0])
         { d.setTextColor(WHITE, BLACK); d.setCursor(x + 4, y - 3); d.print(p.flight); }
     }
+    if (trackingSquawk7500)
+    {
+        for (int i = 0; i < squawkRadar.count; ++i)
+            if (strcmp(squawkRadar.aircraft[i].hex, trackedSquawkHex) == 0)
+            {
+                int x, y;
+                projection.toScreen(squawkRadar.aircraft[i].lat, squawkRadar.aircraft[i].lon, x, y);
+                d.drawCircle(x, y, 7, ORANGE);
+                d.drawCircle(x, y, 8, ORANGE);
+                break;
+            }
+    }
     d.clearClipRect();
-    char title[32]; snprintf(title, sizeof(title), "%dNM AC:%d %s", radiusNM, radar.count,
-                            followGPS ? (observerPosition.fromGPS ? "" : "Poprad") : "PAN");
+    char title[32];
+    if (trackingSquawk7500)
+        snprintf(title, sizeof(title), "%dNM TRACK %.8s%s", radiusNM, trackedSquawkHex,
+                 trackedSquawkLive ? "" : " LOST");
+    else
+        snprintf(title, sizeof(title), "%dNM AC:%d %s", radiusNM, radar.count,
+                 followGPS ? (observerPosition.fromGPS ? "" : "Poprad") : "PAN");
     drawHeader(title);
     d.setTextColor(CYAN, BLACK); d.setCursor(229, 16); d.print("N");
     d.setTextColor(ORANGE, BLACK); d.setClipRect(0, 124, outlineMode ? 70 : 56, 11); d.setCursor(2, 126);
@@ -724,7 +757,7 @@ void drawSquawk7500Screen()
         d.setCursor(87, y); d.printf("%-5.5s", p.type[0] ? p.type : "--");
         d.setCursor(145, y); d.printf("%6.1f NM", distanceNM(observerPosition, p.lat, p.lon));
     }
-    drawFooter("Enter:details Tab:map Opt:menu");
+    drawFooter("Enter:track Tab:map Opt:menu");
 }
 
 void drawDetailScreen()
@@ -942,7 +975,10 @@ void activateMenuItem()
     else if (menuIndex == 1)
     { uiScreen = UiScreen::WifiList; WifiControl::scan(); wakeNetwork(); }
     else if (menuIndex == 2)
-    { followGPS = true; viewPosition = observerPosition; uiScreen = UiScreen::Map; wakeNetwork(); }
+    {
+        trackingSquawk7500 = false; trackedSquawkHex[0] = '\0';
+        followGPS = true; viewPosition = observerPosition; uiScreen = UiScreen::Map; wakeNetwork();
+    }
     else if (menuIndex == 3)
     {
         const uint16_t values[] = {30, 60, 120, 0};
@@ -1026,7 +1062,11 @@ bool handleKeys(const KeyEvents& k)
     }
     if (k.escape)
     {
-        if (uiScreen == UiScreen::Map) { followGPS = true; viewPosition = observerPosition; }
+        if (uiScreen == UiScreen::Map)
+        {
+            trackingSquawk7500 = false; trackedSquawkLive = false; trackedSquawkHex[0] = '\0';
+            followGPS = true; viewPosition = observerPosition;
+        }
         else uiScreen = escapeDestination(uiScreen, menuReturn);
         memset(wifiPassword, 0, sizeof(wifiPassword)); return true;
     }
@@ -1053,7 +1093,7 @@ bool handleKeys(const KeyEvents& k)
             zoomIndex = nextZoom; portENTER_CRITICAL(&viewMux);
             radiusNM = ZOOM_RADII[zoomIndex]; portEXIT_CRITICAL(&viewMux); wakeNetwork();
         }
-        if (k.up || k.down || k.left || k.right)
+        if (!trackingSquawk7500 && (k.up || k.down || k.left || k.right))
         {
             MapProjection::View view(viewPosition.lat, viewPosition.lon, radiusNM);
             view.fromScreen(120 + (k.right - k.left) * 30, 72 + (k.down - k.up) * 30,
@@ -1079,11 +1119,11 @@ bool handleKeys(const KeyEvents& k)
                                       0, max(0, squawkRadar.count - 1));
         if (k.enter && squawkRadar.count)
         {
-            detailFlight = squawkRadar.aircraft[squawkSelectedRow];
-            detailAvailable = true; detailLive = true; detailUpdated = squawkLastSuccess;
-            strlcpy(selectedHex, detailFlight.hex, sizeof(selectedHex));
-            uiScreen = UiScreen::Detail; requestDetailRoute(detailFlight);
-            resetDetailPhoto();
+            const Aircraft& tracked = squawkRadar.aircraft[squawkSelectedRow];
+            strlcpy(trackedSquawkHex, tracked.hex, sizeof(trackedSquawkHex));
+            viewPosition.lat = tracked.lat; viewPosition.lon = tracked.lon; viewPosition.fromGPS = false;
+            trackingSquawk7500 = true; trackedSquawkLive = true; followGPS = false;
+            uiScreen = UiScreen::Map; wakeNetwork();
         }
     }
     else if (uiScreen == UiScreen::Menu)

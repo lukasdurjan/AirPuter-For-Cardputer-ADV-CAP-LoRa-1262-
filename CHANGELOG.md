@@ -2,6 +2,7 @@
 
 ## 2026-10-04
 
+- Added selectable SQUAWK7500 aircraft tracking that keeps the map centred on the chosen aircraft until Esc returns to GPS.
 - Fixed the OSM map disappearing when the first GPS fix moves the view; the previous map remains visible until new GPS-area tiles are ready.
 - Added push-triggered GitHub Actions releases with automatic patch versioning, repository BIN updates and Latest Release publishing.
 - Fixed photo decoding by converting unsupported progressive thumbnails to baseline JPEG for M5GFX.

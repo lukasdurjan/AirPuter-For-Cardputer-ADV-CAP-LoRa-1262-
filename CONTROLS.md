@@ -9,7 +9,7 @@ At startup, a short splash screen displays `Coffee flies the World` and
 | I / O | Zoom the map in/out (5–200 NM). |
 | Opt | Open settings, or close settings to the previous screen. |
 | Tab | Cycle map → flight list → global SQUAWK7500 list → map; from details return to the map. |
-| Enter | Open the selected flight or activate a menu/network item. |
+| Enter | Open a selected nearby flight; in SQUAWK7500 track the selected aircraft on the map; activate a menu/network item. |
 | Hold Alt | Temporarily show the aircraft photo from an active flight detail; release to return. |
 | Esc (top-left key, optionally with Fn) | Details → list; WiFi screens → previous menu. On the map, restore GPS following. Password entry requires Fn+Esc so a plain backtick can be typed. |
 | R in the WiFi list | Scan for networks again. |
@@ -29,6 +29,10 @@ distances are recalculated as the device moves. When details are opened, the
 first row loads the departure and arrival airport for the selected callsign.
 Details also include callsign, ICAO, registration, type, distance/bearing, altitude, groundspeed, track,
 vertical speed, squawk, coordinates, emergency and data age when available.
+
+In the global SQUAWK7500 list, use Up/Down to select an aircraft and press
+Enter to follow it on the map. The map remains centred on each refreshed
+position. Press Esc on the map to stop tracking and return to GPS centring.
 Route data comes from the ADSB.lol VRS standing-data service. Missing fields
 display `--`. If the flight disappears from the latest response,
 its open detail remains visible with a `Last position` label.
