@@ -35,6 +35,7 @@ AirPuter shows nearby aircraft directly on the Cardputer display using live ADS-
 - Nearby-flight list sorted by distance from the observer
 - Global SQUAWK7500 list available from the Tab screen cycle; select an aircraft and press `Enter` to keep the map centred on its live position
 - Persistent display Auto Dim setting: 30, 60, 120 seconds or Off
+- Persistent aircraft refresh interval setting: 1, 2, 5, 10 or 30 seconds (10 seconds by default)
 - Detailed aircraft view: callsign, ICAO, registration, type, route, distance/bearing, altitude, groundspeed, track, vertical speed, squawk, coordinates, emergency state and data age when available
 - Hold `Alt` on an active flight detail to temporarily show its aircraft photo; release it to return to the data
 - Route lookup through ADSB.lol VRS standing data
@@ -68,6 +69,16 @@ The current PlatformIO target is `m5stack-stamps3` and uses the `M5Cardputer` li
 | `Backspace` | Delete character during Wi-Fi password entry |
 
 Aircraft photos and photographer credits are provided by the PlaneSpotters.net public photo API and require Wi-Fi.
+
+The flight list follows the current map viewport and refreshes with incoming aircraft data. Zooming and panning immediately filter cached aircraft; ADS-B requests wait for the configured refresh timer. The query covers the viewport corners. Up to 50 visible aircraft are retained using stable sampling across the complete response; busy areas can contain more aircraft than displayed. Zooming out fills newly visible areas on the next successful refresh.
+
+### API rate limits (HTTP 429)
+
+HTTP 429 ("Too Many Requests") means ADSB.lol has temporarily limited requests. The response itself is a server-side rate limit, not an AirPuter crash or a map-rendering bug. ADSB.lol uses dynamic limits based on server load, so a refresh interval that works normally can occasionally be rate-limited. See the [ADSB.lol API documentation](https://github.com/adsblol/api/blob/main/README.md#rate-limits).
+
+AirPuter automatically pauses both nearby-aircraft and SQUAWK7500 requests for 60 seconds after a 429. Further 429 responses extend the shared pause to 120, 240 and at most 300 seconds. A successful aircraft response resets the next backoff to 60 seconds. The selected Refresh Interval stays saved and unchanged.
+
+During this pause, the last successfully received aircraft data remains available, but positions are not live. The nearby-aircraft status shows "Rate limited - automatic pause" after a nearby request receives 429. Zooming or panning does not bypass the pause or trigger an early ADS-B request. Updates resume automatically; a restart is unnecessary. Choosing a longer Refresh Interval can reduce request pressure. An actual device restart is a separate fault and should not be treated as normal rate-limit behavior.
 
 ## Map modes
 

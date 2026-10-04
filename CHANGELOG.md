@@ -2,6 +2,12 @@
 
 ## 2026-10-04
 
+- Documented server-side HTTP 429 rate limits, automatic recovery, and stale aircraft data during cooldown.
+
+- Synchronized the flight list with the current map viewport; zoom/pan no longer bypass the ADS-B refresh timer.
+- Expanded aircraft queries to cover map corners and replaced first-50 truncation with bounded stable sampling of the complete response.
+
+- Added a persistent 1/2/5/10/30-second aircraft refresh setting (10 seconds by default) and exponential 60–300-second backoff after HTTP 429 responses.
 - Temporarily removed the experimental ATC audio streaming feature and its settings to restore firmware stability.
 - Fixed silent ATC playback by initializing the M5Cardputer speaker before starting the decoder task.
 - Added HTTPS and redirect support for custom ATC streams such as dynamic `d.liveatc.net` MP3 endpoints.

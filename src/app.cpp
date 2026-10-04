@@ -17,9 +17,10 @@ extern const char* WIFI_SSID;
 extern const char* WIFI_PASS;
 constexpr double HOME_LAT = 49.0550, HOME_LON = 20.3010;
 constexpr int GPS_RX_PIN = 15, MAX_AIRCRAFT = 50;
-constexpr uint32_t GPS_MAX_AGE_MS = 5000, REFRESH_MS = 10000;
+constexpr uint32_t GPS_MAX_AGE_MS = 5000;
 constexpr size_t MAX_PHOTO_BYTES = 45000;
 constexpr int ZOOM_RADII[] = {5, 10, 25, 50, 100, 200};
+constexpr uint16_t REFRESH_INTERVALS[] = {10, 15, 20, 25, 30};
 constexpr char API_USER_AGENT[] = "AirPuter/1.0";
 constexpr char PHOTO_USER_AGENT[] = "AirPuter/1.0 (+https://ko-fi.com/lukaslukee)";
 constexpr char FIRMWARE_VERSION[] = "AirPuter " AIRPUTER_VERSION;
@@ -85,6 +86,7 @@ bool canvasReady = false, followGPS = true, outlineMode = false;
 bool trackingSquawk7500 = false, trackedSquawkLive = false;
 char trackedSquawkHex[9] = {};
 uint16_t autoDimSeconds = 30;
+uint16_t refreshSeconds = 10;
 uint32_t lastInputAt = 0;
 bool displayDimmed = false;
 bool settingsReady = false;
@@ -93,6 +95,7 @@ Preferences settings;
 UiScreen uiScreen = UiScreen::Map, menuReturn = UiScreen::Map;
 int menuIndex = 0, selectedRow = 0, squawkSelectedRow = 0, wifiRow = 0;
 int flightOrder[MAX_AIRCRAFT] = {};
+int visibleFlightCount = 0;
 double flightDistances[MAX_AIRCRAFT] = {};
 char selectedHex[9] = {};
 Aircraft detailFlight;
@@ -165,6 +168,19 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
     int requestRadius = radiusNM;
     if (!squawk7500) result.center = aircraftRequestCenter;
     portEXIT_CRITICAL(&viewMux);
+    MapProjection::View requestView(result.center.lat, result.center.lon, requestRadius);
+    if (!squawk7500)
+    {
+        double coverage = 0;
+        for (int x : {0, 239})
+            for (int y : {15, 123})
+            {
+                double lat, lon;
+                requestView.fromScreen(x, y, lat, lon);
+                coverage = std::max(coverage, distanceNM(result.center, lat, lon));
+            }
+        requestRadius = int(std::ceil(coverage)) + 1;
+    }
     String url = squawk7500 ? "https://api.adsb.lol/v2/sqk/7500" :
         "https://api.adsb.lol/v2/lat/" + String(result.center.lat, 5) +
         "/lon/" + String(result.center.lon, 5) + "/dist/" + String(requestRadius);
@@ -205,8 +221,16 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
     const char* fields[] = {"hex", "flight", "r", "t", "lat", "lon", "alt_baro", "gs",
                            "track", "baro_rate", "geom_rate", "squawk", "emergency", "seen_pos"};
     for (const char* field : fields) filter[field] = true;
-    while (result.count < MAX_AIRCRAFT)
+    uint32_t candidates = 0;
+    uint32_t parseStarted = millis();
+    while (true)
     {
+        vTaskDelay(1);
+        if (millis() - parseStarted > 30000)
+        {
+            strlcpy(result.error, "Aircraft response timeout", sizeof(result.error));
+            http.end(); return false;
+        }
         int next = peekJsonCharacter(stream);
         if (next == ']') break; // Valid empty response clears the list.
         if (next != '{')
@@ -241,9 +265,31 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
             if (item["baro_rate"].is<int>()) p.verticalRate = item["baro_rate"].as<int>();
             else if (item["geom_rate"].is<int>()) p.verticalRate = item["geom_rate"].as<int>();
             if (p.hex[0] && isfinite(p.lat) && isfinite(p.lon) && abs(p.lat) <= 90 && abs(p.lon) <= 180)
-                result.aircraft[result.count++] = p;
+            {
+                int x, y;
+                requestView.toScreen(p.lat, p.lon, x, y);
+                if (squawk7500 || (x >= 0 && x < 240 && y >= 15 && y < 124))
+                {
+                    // Stable hash sampling examines the entire response, without
+                    // favouring the first (often closest) aircraft or growing RAM.
+                    auto rank = [](const Aircraft& a) {
+                        uint32_t hash = 2166136261u;
+                        for (const char* c = a.hex; *c; ++c)
+                            hash = (hash ^ uint8_t(*c)) * 16777619u;
+                        return hash;
+                    };
+                    ++candidates;
+                    if (result.count < MAX_AIRCRAFT) result.aircraft[result.count++] = p;
+                    else
+                    {
+                        int worst = 0;
+                        for (int i = 1; i < result.count; ++i)
+                            if (rank(result.aircraft[i]) > rank(result.aircraft[worst])) worst = i;
+                        if (rank(p) < rank(result.aircraft[worst])) result.aircraft[worst] = p;
+                    }
+                }
+            }
         }
-        if (result.count >= MAX_AIRCRAFT) break;
         next = peekJsonCharacter(stream);
         if (next == ']') break;
         if (next != ',')
@@ -254,7 +300,7 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
         stream.read();
     }
     http.end();
-    Serial.printf("Aircraft loaded: %d\n", result.count);
+    Serial.printf("Aircraft loaded: %d / %u in view\n", result.count, unsigned(candidates));
     return true;
 }
 
@@ -411,8 +457,8 @@ void networkTask(void*)
     bool squawkAttempted = false;
     uint32_t lastAttempt = 0;
     uint32_t lastSquawkAttempt = 0;
-    int lastRadius = 0;
-    Position lastCenter;
+    uint32_t rateLimitUntil = 0;
+    uint32_t rateLimitBackoff = 60000;
     static NetworkResult result; // Large buffers never occupy the worker stack.
     for (;;)
     {
@@ -447,29 +493,42 @@ void networkTask(void*)
             portEXIT_CRITICAL(&photoMux);
         }
         OnlineMap::service();
-        Position center;
         portENTER_CRITICAL(&viewMux);
-        int currentRadius = radiusNM;
-        center = aircraftRequestCenter;
+        uint16_t currentRefreshSeconds = refreshSeconds;
         portEXIT_CRITICAL(&viewMux);
-        bool changed = currentRadius != lastRadius || center.fromGPS != lastCenter.fromGPS ||
-                       distanceNM(lastCenter, center.lat, center.lon) > currentRadius * 0.05;
         uint32_t elapsed = millis() - lastAttempt;
-        if (!attempted || elapsed >= REFRESH_MS || (changed && elapsed >= 2000))
+        bool rateLimited = int32_t(millis() - rateLimitUntil) < 0;
+        uint32_t refreshMs = uint32_t(currentRefreshSeconds) * 1000;
+        if (!rateLimited && (!attempted || elapsed >= refreshMs))
         {
             lastAttempt = millis(); attempted = true;
-            lastRadius = currentRadius; lastCenter = center;
             result.success = downloadAircraft(result);
+            if (result.httpCode == 429)
+            {
+                rateLimitUntil = millis() + rateLimitBackoff;
+                rateLimitBackoff = std::min<uint32_t>(rateLimitBackoff * 2, 300000);
+            }
+            else if (result.success)
+                rateLimitBackoff = 60000;
             portENTER_CRITICAL(&resultMux);
             inbox = result; ++inboxVersion;
             portEXIT_CRITICAL(&resultMux);
         }
         bool showSquawk = uiScreen == UiScreen::Squawk7500 || trackingSquawk7500;
-        if (showSquawk && (!squawkAttempted || millis() - lastSquawkAttempt >= REFRESH_MS))
+        rateLimited = int32_t(millis() - rateLimitUntil) < 0;
+        if (showSquawk && !rateLimited &&
+            (!squawkAttempted || millis() - lastSquawkAttempt >= refreshMs))
         {
             lastSquawkAttempt = millis(); squawkAttempted = true;
             static NetworkResult squawkResult;
             squawkResult.success = downloadAircraft(squawkResult, true);
+            if (squawkResult.httpCode == 429)
+            {
+                rateLimitUntil = millis() + rateLimitBackoff;
+                rateLimitBackoff = std::min<uint32_t>(rateLimitBackoff * 2, 300000);
+            }
+            else if (squawkResult.success)
+                rateLimitBackoff = 60000;
             portENTER_CRITICAL(&resultMux);
             squawkInbox = squawkResult; ++squawkInboxVersion;
             portEXIT_CRITICAL(&resultMux);
@@ -480,22 +539,27 @@ void networkTask(void*)
 
 void updateFlightOrder()
 {
+    MapProjection::View view(viewPosition.lat, viewPosition.lon, radiusNM);
+    visibleFlightCount = 0;
     for (int i = 0; i < radar.count; ++i)
     {
-        flightOrder[i] = i;
+        int x, y;
+        view.toScreen(radar.aircraft[i].lat, radar.aircraft[i].lon, x, y);
+        if (x >= 0 && x < 240 && y >= 15 && y < 124)
+            flightOrder[visibleFlightCount++] = i;
         flightDistances[i] = distanceNM(observerPosition, radar.aircraft[i].lat, radar.aircraft[i].lon);
     }
-    std::sort(flightOrder, flightOrder + radar.count, [](int a, int b) {
+    std::sort(flightOrder, flightOrder + visibleFlightCount, [](int a, int b) {
         if (flightDistances[a] == flightDistances[b])
             return strcmp(radar.aircraft[a].hex, radar.aircraft[b].hex) < 0;
         return flightDistances[a] < flightDistances[b];
     });
-    selectedRow = constrain(selectedRow, 0, max(0, radar.count - 1));
-    for (int row = 0; row < radar.count; ++row)
+    selectedRow = constrain(selectedRow, 0, max(0, visibleFlightCount - 1));
+    for (int row = 0; row < visibleFlightCount; ++row)
         if (strcmp(radar.aircraft[flightOrder[row]].hex, selectedHex) == 0) selectedRow = row;
     bool holdDetail = uiScreen == UiScreen::Detail ||
         (uiScreen != UiScreen::Map && uiScreen != UiScreen::List && menuReturn == UiScreen::Detail);
-    if (!holdDetail && radar.count)
+    if (!holdDetail && visibleFlightCount)
         strlcpy(selectedHex, radar.aircraft[flightOrder[selectedRow]].hex, sizeof(selectedHex));
     detailLive = false;
     for (int i = 0; i < radar.count; ++i)
@@ -517,6 +581,8 @@ bool applyNetworkResult()
     if (!changed) return false;
     if (result.success)
     { radar = result; lastSuccess = millis(); statusText[0] = '\0'; }
+    else if (result.httpCode == 429)
+        strlcpy(statusText, "Rate limited - automatic pause", sizeof(statusText));
     else if (result.httpCode && result.httpCode != HTTP_CODE_OK)
         snprintf(statusText, sizeof(statusText), "HTTP %d - retrying", result.httpCode);
     else strlcpy(statusText, result.error, sizeof(statusText));
@@ -714,15 +780,15 @@ void drawMapScreen()
 
 void drawListScreen()
 {
-    auto& d = screen(); char title[32]; snprintf(title, sizeof(title), "FLIGHTS %d (%dNM)", radar.count, radiusNM);
+    auto& d = screen(); char title[32]; snprintf(title, sizeof(title), "FLIGHTS %d (%dNM)", visibleFlightCount, radiusNM);
     drawHeader(title);
-    if (!radar.count)
+    if (!visibleFlightCount)
     {
         d.setTextColor(WHITE, BLACK); d.setCursor(6, 34); d.print("No aircraft in range");
         d.setCursor(6, 53); d.print(!wifiView.connected ? "Connect WiFi in Opt menu" : statusText);
     }
     int first = selectedRow / 6 * 6;
-    for (int row = first; row < min(first + 6, radar.count); ++row)
+    for (int row = first; row < min(first + 6, visibleFlightCount); ++row)
     {
         int y = 19 + (row - first) * 17;
         uint16_t bg = row == selectedRow ? 0x2104 : BLACK;
@@ -832,10 +898,12 @@ void drawMenuScreen()
     char dimText[24];
     if (autoDimSeconds) snprintf(dimText, sizeof(dimText), "Auto Dim: %us", autoDimSeconds);
     else strlcpy(dimText, "Auto Dim: Off", sizeof(dimText));
+    char refreshText[28];
+    snprintf(refreshText, sizeof(refreshText), "Refresh Interval: %us", refreshSeconds);
     const char* items[] = {outlineMode ? "Map: Outline" : "Map: Tiles", "Wi-Fi networks", "Center on GPS",
-                           dimText, "Back"};
-    int first = 0;
-    for (int i = first; i < 5; ++i)
+                           dimText, refreshText, "Back"};
+    int first = menuIndex < 5 ? 0 : menuIndex - 4;
+    for (int i = first; i < min(first + 5, 6); ++i)
     {
         int y = 21 + (i - first) * 20; uint16_t bg = i == menuIndex ? 0x2104 : BLACK;
         d.fillRect(0, y - 3, 240, 18, bg); d.setTextColor(i == menuIndex ? YELLOW : WHITE, bg);
@@ -954,8 +1022,8 @@ void resetDetailPhoto()
 
 void selectFlightRow(int row)
 {
-    selectedRow = constrain(row, 0, max(0, radar.count - 1));
-    if (radar.count) strlcpy(selectedHex, radar.aircraft[flightOrder[selectedRow]].hex, sizeof(selectedHex));
+    selectedRow = constrain(row, 0, max(0, visibleFlightCount - 1));
+    if (visibleFlightCount) strlcpy(selectedHex, radar.aircraft[flightOrder[selectedRow]].hex, sizeof(selectedHex));
     updateFlightOrder();
 }
 
@@ -988,6 +1056,16 @@ void activateMenuItem()
         autoDimSeconds = values[(index + 1) % 4];
         if (settingsReady) settings.putUShort("autodim", autoDimSeconds);
         lastInputAt = millis();
+    }
+    else if (menuIndex == 4)
+    {
+        int index = 0;
+        while (index < 5 && REFRESH_INTERVALS[index] != refreshSeconds) ++index;
+        portENTER_CRITICAL(&viewMux);
+        refreshSeconds = REFRESH_INTERVALS[(index + 1) % 5];
+        portEXIT_CRITICAL(&viewMux);
+        if (settingsReady) settings.putUShort("refresh", refreshSeconds);
+        wakeNetwork();
     }
     else uiScreen = menuReturn;
 }
@@ -1106,7 +1184,7 @@ bool handleKeys(const KeyEvents& k)
     else if (uiScreen == UiScreen::List)
     {
         selectFlightRow(selectedRow + (k.down ? 1 : 0) - (k.up ? 1 : 0));
-        if (k.enter && radar.count)
+        if (k.enter && visibleFlightCount)
         {
             Aircraft selected = radar.aircraft[flightOrder[selectedRow]];
             uiScreen = UiScreen::Detail;
@@ -1130,8 +1208,8 @@ bool handleKeys(const KeyEvents& k)
     }
     else if (uiScreen == UiScreen::Menu)
     {
-        menuIndex = constrain(menuIndex + (k.down - k.up), 0, 4);
-        if (k.enter || ((k.left || k.right) && (menuIndex == 0 || menuIndex == 3))) activateMenuItem();
+        menuIndex = constrain(menuIndex + (k.down - k.up), 0, 5);
+        if (k.enter || ((k.left || k.right) && (menuIndex == 0 || menuIndex == 3 || menuIndex == 4))) activateMenuItem();
     }
     else if (uiScreen == UiScreen::WifiList)
     {
@@ -1165,7 +1243,7 @@ void drawSplash()
     d.setCursor((240 - d.textWidth(address)) / 2, 78);
     d.print(address);
     if (canvasReady) canvas.pushSprite(0, 0);
-    delay(2500);
+    delay(3500);
 }
 
 void setup()
@@ -1180,6 +1258,11 @@ void setup()
         autoDimSeconds = settings.getUShort("autodim", 30);
         if (autoDimSeconds != 30 && autoDimSeconds != 60 && autoDimSeconds != 120 && autoDimSeconds != 0)
             autoDimSeconds = 30;
+        refreshSeconds = settings.getUShort("refresh", 10);
+        bool validRefresh = false;
+        for (uint16_t value : REFRESH_INTERVALS)
+            if (refreshSeconds == value) validRefresh = true;
+        if (!validRefresh) refreshSeconds = 10;
     }
     M5Cardputer.Display.setBrightness(128); lastInputAt = millis();
     OnlineMap::begin(); OnlineMap::request(viewPosition.lat, viewPosition.lon, radiusNM);
@@ -1211,6 +1294,7 @@ void loop()
     static uint32_t lastOrder = 0;
     if (changed || millis() - lastOrder >= 1000) { updateFlightOrder(); lastOrder = millis(); }
     bool keysChanged = handleKeys(readKeys());
+    if (keysChanged) updateFlightOrder();
     if (keysChanged) scrollStarted = millis();
     changed |= keysChanged;
     bool photoHeldNow = uiScreen == UiScreen::Detail && M5Cardputer.Keyboard.keysState().alt;
