@@ -35,6 +35,7 @@ AirPuter shows nearby aircraft directly on the Cardputer display using live ADS-
 - Nearby-flight list sorted by distance from the observer
 - Global SQUAWK7500 list available from the Tab screen cycle; select an aircraft and press `Enter` to keep the map centred on its live position
 - Persistent display Auto Dim setting: 30, 60, 120 seconds or Off
+- Optional custom ATC MP3/Icecast stream with persistent On/Off, source URL and volume settings
 - Detailed aircraft view: callsign, ICAO, registration, type, route, distance/bearing, altitude, groundspeed, track, vertical speed, squawk, coordinates, emergency state and data age when available
 - Hold `Alt` on an active flight detail to temporarily show its aircraft photo; release it to return to the data
 - Route lookup through ADSB.lol VRS standing data
@@ -63,11 +64,21 @@ The current PlatformIO target is `m5stack-stamps3` and uses the `M5Cardputer` li
 | `Tab` | Cycle map, flight list and global SQUAWK7500 list; details → map |
 | `Enter` | Open a normal selected flight; in SQUAWK7500 start map tracking; activate a menu item |
 | Hold `Alt` | Show the aircraft photo while viewing active flight details |
+| `W` / `A` | Increase / decrease ATC stream volume |
 | `Esc` | Details → list; Wi-Fi screen → previous menu; on map restore GPS following |
 | `R` | Rescan Wi-Fi networks while in Wi-Fi list |
+| `Backspace` | Delete character during Wi-Fi password or ATC source entry |
 
 Aircraft photos and photographer credits are provided by the PlaneSpotters.net public photo API and require Wi-Fi.
-| `Backspace` | Delete character during Wi-Fi password entry |
+
+### Custom ATC audio
+
+Settings contains `ATC: On/Off` (Off by default) and `ATC Source`. Enter a direct
+HTTP MP3/Icecast stream URL using the keyboard and press Enter to save it. The
+URL, enabled state and volume survive restart. The firmware does not bundle or
+discover third-party feeds; users are responsible for choosing a stream they
+are permitted to access. Use `W` for volume up and `A` for volume down outside
+text-entry screens.
 
 ## Map modes
 

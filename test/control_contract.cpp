@@ -9,3 +9,4 @@ static_assert(escapeDestination(UiScreen::Detail, UiScreen::Map) == UiScreen::Li
 static_assert(escapeDestination(UiScreen::Menu, UiScreen::Detail) == UiScreen::Detail, "Menu returns to the originating detail");
 static_assert(escapeDestination(UiScreen::WifiPassword, UiScreen::List) == UiScreen::WifiList, "Cancel password entry returns to networks");
 static_assert(escapeDestination(UiScreen::WifiList, UiScreen::Map) == UiScreen::Menu, "Esc from WiFi returns to settings");
+static_assert(escapeDestination(UiScreen::AtcSource, UiScreen::Map) == UiScreen::Menu, "Esc from ATC source returns to settings");

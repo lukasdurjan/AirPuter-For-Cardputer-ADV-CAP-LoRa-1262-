@@ -11,11 +11,15 @@ At startup, a short splash screen displays `Coffee flies the World` and
 | Tab | Cycle map → flight list → global SQUAWK7500 list → map; from details return to the map. |
 | Enter | Open a selected nearby flight; in SQUAWK7500 track the selected aircraft on the map; activate a menu/network item. |
 | Hold Alt | Temporarily show the aircraft photo from an active flight detail; release to return. |
+| W / A | Increase / decrease custom ATC stream volume. |
 | Esc (top-left key, optionally with Fn) | Details → list; WiFi screens → previous menu. On the map, restore GPS following. Password entry requires Fn+Esc so a plain backtick can be typed. |
 | R in the WiFi list | Scan for networks again. |
 | Backspace in the password form | Delete a character. |
 
-Settings include Tiles/Outline, WiFi networks, Center on GPS, persistent Auto Dim (30/60/120s/Off) and Back.
+Settings include Tiles/Outline, WiFi networks, Center on GPS, persistent Auto Dim
+(30/60/120s/Off), ATC On/Off, a custom ATC Source URL and Back. ATC is Off by
+default. Source URL, enabled state and volume persist across restarts. Only use
+streams you are authorized to access.
 Outline is a black map with city labels and country outlines, with no raster
 tile downloads. The setting survives restart. Open networks connect directly;
 protected networks prompt for a masked password. Successfully connected WiFi
