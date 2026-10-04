@@ -33,7 +33,10 @@ AirPuter shows nearby aircraft directly on the Cardputer display using live ADS-
 - Lightweight outline-map mode with country outlines and city labels
 - Map pan and 5 / 10 / 25 / 50 / 100 / 200 NM zoom levels
 - Nearby-flight list sorted by distance from the observer
+- Global SQUAWK7500 list available from the Tab screen cycle
+- Persistent display Auto Dim setting: 30, 60, 120 seconds or Off
 - Detailed aircraft view: callsign, ICAO, registration, type, route, distance/bearing, altitude, groundspeed, track, vertical speed, squawk, coordinates, emergency state and data age when available
+- Hold `Alt` on an active flight detail to temporarily show its aircraft photo; release it to return to the data
 - Route lookup through ADSB.lol VRS standing data
 - GPS input through the LoRa/GPS CAP (UART RX on GPIO 15, 115200 baud)
 - Automatic Poprad, Slovakia fallback position when no valid GPS fix is available
@@ -57,10 +60,13 @@ The current PlatformIO target is `m5stack-stamps3` and uses the `M5Cardputer` li
 | Arrow keys | Pan map; move through lists/menus |
 | `I` / `O` | Zoom in / out |
 | `Opt` | Open settings / return from settings |
-| `Tab` | Switch map and flight list; details → map |
+| `Tab` | Cycle map, flight list and global SQUAWK7500 list; details → map |
 | `Enter` | Open selected flight / activate menu item |
+| Hold `Alt` | Show the aircraft photo while viewing active flight details |
 | `Esc` | Details → list; Wi-Fi screen → previous menu; on map restore GPS following |
 | `R` | Rescan Wi-Fi networks while in Wi-Fi list |
+
+Aircraft photos and photographer credits are provided by the PlaneSpotters.net public photo API and require Wi-Fi.
 | `Backspace` | Delete character during Wi-Fi password entry |
 
 ## Map modes
