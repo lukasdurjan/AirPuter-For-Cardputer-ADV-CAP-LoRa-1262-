@@ -74,7 +74,7 @@ Aircraft photos and photographer credits are provided by the PlaneSpotters.net p
 ### Custom ATC audio
 
 Settings contains `ATC: On/Off` (Off by default) and `ATC Source`. Enter a direct
-HTTP MP3/Icecast stream URL using the keyboard and press Enter to save it. The
+HTTP or HTTPS MP3/Icecast stream URL using the keyboard and press Enter to save it. Redirects are followed automatically. The
 URL, enabled state and volume survive restart. The firmware does not bundle or
 discover third-party feeds; users are responsible for choosing a stream they
 are permitted to access. Use `W` for volume up and `A` for volume down outside

@@ -6,7 +6,6 @@
 #include <TinyGPS++.h>
 #include <Preferences.h>
 #include <algorithm>
-#include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
 #include <atomic>
 #include "online_map.h"
@@ -15,6 +14,7 @@
 #include "wifi_control.h"
 #include "ui_state.h"
 #include "audio_output_m5.h"
+#include "audio_file_source_secure.h"
 #include "generated_version.h"
 
 extern const char* WIFI_SSID;
@@ -127,7 +127,7 @@ void atcTask(void*)
 {
     uint32_t activeGeneration = UINT32_MAX;
     uint32_t lastRetry = 0;
-    AudioFileSourceICYStream* source = nullptr;
+    AudioFileSourceSecure* source = nullptr;
     AudioGeneratorMP3* decoder = nullptr;
     for (;;)
     {
@@ -145,7 +145,7 @@ void atcTask(void*)
             if (enabled && url[0] && WiFi.status() == WL_CONNECTED)
             {
                 strlcpy(atcStatus, "Connecting...", sizeof(atcStatus));
-                source = new AudioFileSourceICYStream(url);
+                source = new AudioFileSourceSecure(url);
                 decoder = new AudioGeneratorMP3();
                 if (source->isOpen() && decoder->begin(source, &atcOutput))
                     strlcpy(atcStatus, "Playing", sizeof(atcStatus));
