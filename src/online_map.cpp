@@ -2,8 +2,10 @@
 #include <HTTPClient.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 #include "online_map.h"
+#include "heap_operation_guard.h"
 
 extern const char* MAP_TILE_SERVER;
 
@@ -12,6 +14,7 @@ constexpr uint32_t CACHE_MAGIC = 0x41504D33;
 constexpr uint32_t DEFAULT_TTL = 7 * 24 * 60 * 60;
 constexpr size_t MAX_TILE_BYTES = 80000;
 constexpr int MAX_CACHE_TILES = 36;
+constexpr size_t MIN_PNG_CONTIGUOUS_HEAP = 44000;
 constexpr char USER_AGENT[] = "AirPuter/1.3";
 
 struct Metadata {
@@ -59,7 +62,9 @@ Metadata readMetadata(const TileKey& key)
 {
     Metadata metadata;
     metadata.magic = 0;
-    File file = LittleFS.open(tilePath(key, ".meta"), "r");
+    String path = tilePath(key, ".meta");
+    if (!LittleFS.exists(path)) return metadata;
+    File file = LittleFS.open(path, "r");
     if (file)
     {
         if (file.read(reinterpret_cast<uint8_t*>(&metadata), sizeof(metadata)) != sizeof(metadata))
@@ -73,7 +78,9 @@ bool validCache(const TileKey& key, const Metadata& metadata)
 {
     if (metadata.magic != CACHE_MAGIC || metadata.size < 24 || metadata.size > MAX_TILE_BYTES)
         return false;
-    File file = LittleFS.open(tilePath(key, ".png"), "r");
+    String path = tilePath(key, ".png");
+    if (!LittleFS.exists(path)) return false;
+    File file = LittleFS.open(path, "r");
     bool valid = file && file.size() == metadata.size;
     file.close();
     return valid;
@@ -216,6 +223,7 @@ bool validatePng(const String& path, size_t size)
 
 bool downloadTile(const TileKey& key, const Metadata& cached, bool haveCache)
 {
+    HeapOperationGuard::Lock heapLock;
     HTTPClient http;
     http.setUserAgent(USER_AGENT);
     http.useHTTP10(true);
@@ -281,7 +289,7 @@ bool downloadTile(const TileKey& key, const Metadata& cached, bool haveCache)
     }
     xSemaphoreTake(fsMutex, portMAX_DELAY);
     String target = tilePath(key, ".png");
-    LittleFS.remove(target);
+    if (LittleFS.exists(target)) LittleFS.remove(target);
     bool saved = LittleFS.rename(temporary, target);
     if (saved)
     {
@@ -355,7 +363,10 @@ void draw(lgfx::LovyanGFX& display)
     bool changed = retryDecode || version != drawnVersion || previousCenterX != MapProjection::CENTER_X ||
                    previousCenterY != MapProjection::CENTER_Y ||
                    view.radius != drawnRadius || view.zoom != drawnZoom;
-    if (changed && cacheReady && backgroundReady && xSemaphoreTake(fsMutex, 0) == pdTRUE)
+    HeapOperationGuard::Lock heapLock(false);
+    bool enoughHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= MIN_PNG_CONTIGUOUS_HEAP;
+    if (changed && heapLock && enoughHeap && cacheReady && backgroundReady &&
+        xSemaphoreTake(fsMutex, 0) == pdTRUE)
     {
         bool targetHasTile = false;
         for (int row = view.firstY; row <= view.lastY && !targetHasTile; ++row)
@@ -393,7 +404,12 @@ void draw(lgfx::LovyanGFX& display)
                                            x, y, 0, 0, 0, 0, view.scale, view.scale))
                     ++visibleTiles;
                 else
+                {
+                    Serial.printf("Map decode %d/%d/%d failed: heap=%u largest=%u\n",
+                                  key.zoom, key.x, key.y, unsigned(ESP.getFreeHeap()),
+                                  unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
                     retryDecode = true;
+                }
             }
         }
         background.releasePngMemory();

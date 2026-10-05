@@ -82,6 +82,12 @@ During this pause, the last successfully received aircraft data remains availabl
 
 ## Map modes
 
+### Important map-loading bugfix
+
+Map tiles could download successfully but intermittently remain on **Map waiting for data**, especially while an ADS-B request was running. The cause was simultaneous TLS/network activity and PNG decoding competing for one large contiguous block of ESP32-S3 heap. A tile could return HTTP 200 and be saved correctly while the M5GFX PNG decoder still failed to allocate its working memory.
+
+AirPuter now serializes memory-intensive HTTP/TLS operations and PNG decoding. Map rendering never blocks the UI: when networking is using the required memory, decoding is deferred automatically and retried after the operation finishes. A contiguous-heap guard also prevents starting a PNG decode that cannot complete. This applies when centring on GPS, panning, and changing zoom.
+
 ### Tiles
 
 Downloads visible PNG tiles from OpenStreetMap while the tile map is displayed. AirPuter displays the required OpenStreetMap attribution on screen.

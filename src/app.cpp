@@ -10,6 +10,7 @@
 #include "outline_map.h"
 #include "flight_data.h"
 #include "wifi_control.h"
+#include "heap_operation_guard.h"
 #include "ui_state.h"
 #include "generated_version.h"
 
@@ -162,6 +163,7 @@ int peekJsonCharacter(WiFiClient& stream)
 
 bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
 {
+    HeapOperationGuard::Lock heapLock;
     result.count = 0; result.success = false; result.httpCode = 0; result.error[0] = '\0';
     result.center = readPosition();
     portENTER_CRITICAL(&viewMux);
@@ -306,6 +308,7 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
 
 bool downloadRoute(const RouteRequest& request, RouteResult& result)
 {
+    HeapOperationGuard::Lock heapLock;
     result = RouteResult();
     result.id = request.id;
     strlcpy(result.callsign, request.callsign, sizeof(result.callsign));
@@ -382,6 +385,7 @@ bool downloadRoute(const RouteRequest& request, RouteResult& result)
 
 bool downloadPhoto(const PhotoRequest& request, PhotoResult& result, uint8_t* data)
 {
+    HeapOperationGuard::Lock heapLock;
     result = PhotoResult();
     result.id = request.id;
     strlcpy(result.hex, request.hex, sizeof(result.hex));
@@ -1251,6 +1255,7 @@ void drawSplash()
 void setup()
 {
     M5Cardputer.begin(M5.config(), true); Serial.begin(115200); Serial.println(FIRMWARE_VERSION);
+    HeapOperationGuard::begin();
     canvas.setColorDepth(8); canvasReady = canvas.createSprite(240, 135) != nullptr;
     drawSplash();
     settingsReady = settings.begin("airputer-ui", false);
