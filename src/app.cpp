@@ -83,7 +83,7 @@ uint32_t nextPhotoId = 0, consumedPhotoId = 0, photoInboxVersion = 0, photoAppli
 uint8_t photoData[MAX_PHOTO_BYTES] = {};
 char statusText[64] = "Connecting WiFi";
 M5Canvas canvas(&M5Cardputer.Display);
-bool canvasReady = false, followGPS = true, outlineMode = false;
+bool canvasReady = false, followGPS = true, outlineMode = true;
 bool trackingSquawk7500 = false, trackedSquawkLive = false;
 char trackedSquawkHex[9] = {};
 uint16_t autoDimSeconds = 30;
@@ -1261,7 +1261,7 @@ void setup()
     settingsReady = settings.begin("airputer-ui", false);
     if (settingsReady)
     {
-        outlineMode = settings.getBool("outline", false);
+        outlineMode = settings.getBool("outline", true);
         autoDimSeconds = settings.getUShort("autodim", 30);
         if (autoDimSeconds != 30 && autoDimSeconds != 60 && autoDimSeconds != 120 && autoDimSeconds != 0)
             autoDimSeconds = 30;
