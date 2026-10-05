@@ -132,6 +132,20 @@ pio device monitor -b 115200
 
 AirPuter can scan for Wi-Fi networks and enter credentials directly on the Cardputer. Successfully connected credentials are stored for subsequent starts.
 
+### Important Wi-Fi scan bugfix
+
+The Wi-Fi scanner previously found no networks in most scans on some devices. An empty or placeholder `NONE` SSID was incorrectly treated as a configured network, causing a connection attempt to run before the scan. The scan could then start while the ESP32-S3 radio was still changing state and return an empty result.
+
+The scanner now:
+
+- treats empty and `NONE` credentials as **Wi-Fi not configured**;
+- waits for the radio to stabilize before scanning;
+- scans hidden networks and spends longer listening on each channel;
+- retries automatically up to three times after a failed or empty scan;
+- displays both the signal level (`+++`, `++`, `+`, `-`) and RSSI value for every network.
+
+When Wi-Fi is not configured, the map displays **“No WiFi - press Opt, select network”**. Press `Opt`, choose **Wi-Fi networks**, select a network, and enter its password. Press `R` in the network list to request another scan manually.
+
 `src/main.cpp` contains optional fallback credentials. **Do not commit personal Wi-Fi credentials to a public repository.** Leave them empty for public builds:
 
 ```cpp

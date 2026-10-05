@@ -17,7 +17,15 @@ char activeSSID[33] = {}, activePassword[65] = {};
 uint32_t connectStarted = 0;
 bool savingPending = false;
 bool scanRunning = false;
+bool scanPending = false;
+uint8_t scanAttempts = 0;
+uint32_t scanReadyAt = 0;
 uint32_t nextConnectionId = 0;
+
+bool hasCredentials(const char* ssid)
+{
+    return ssid && ssid[0] && strcasecmp(ssid, "NONE") != 0;
+}
 
 void publish()
 {
@@ -70,13 +78,23 @@ uint32_t connect(const char* ssid, const char* password)
 void startConnection(const char* ssid, const char* password)
 {
     if (scanRunning) { WiFi.scanDelete(); scanRunning = false; }
+    scanPending = false;
     worker.scanning = false;
     strlcpy(activeSSID, ssid, sizeof(activeSSID));
     strlcpy(activePassword, password, sizeof(activePassword));
     worker.error[0] = '\0';
     worker.connecting = true;
     worker.connected = false;
+    worker.configured = hasCredentials(ssid);
     strlcpy(worker.ssid, ssid, sizeof(worker.ssid));
+    if (!worker.configured)
+    {
+        activeSSID[0] = activePassword[0] = worker.ssid[0] = worker.ip[0] = '\0';
+        worker.connecting = false;
+        savingPending = false;
+        WiFi.disconnect(false, false);
+        return;
+    }
     WiFi.setAutoReconnect(false);
     WiFi.disconnect(false, false);
     WiFi.begin(ssid, password);
@@ -95,6 +113,7 @@ void begin(const char* defaultSSID, const char* defaultPassword)
         password = prefs.getString("password", defaultPassword);
         prefs.end();
     }
+    if (!hasCredentials(ssid.c_str())) { ssid = ""; password = ""; }
     startConnection(ssid.c_str(), password.c_str());
     publish();
 }
@@ -115,18 +134,35 @@ void service()
     }
     if (next.scan && !scanRunning && !worker.connecting)
     {
-        WiFi.scanDelete();
-        int16_t result = WiFi.scanNetworks(true, false);
-        scanRunning = result == WIFI_SCAN_RUNNING || result >= 0;
-        worker.scanning = scanRunning;
+        scanPending = true;
+        scanAttempts = 0;
+        scanReadyAt = millis() + 350;
+        worker.scanning = true;
         worker.error[0] = '\0';
-        if (!scanRunning) strlcpy(worker.error, "WiFi scan failed", sizeof(worker.error));
     }
     else if (next.scan && worker.connecting)
     {
         portENTER_CRITICAL(&mux);
         request.scan = true;
         portEXIT_CRITICAL(&mux);
+    }
+    if (scanPending && !worker.connecting && int32_t(millis() - scanReadyAt) >= 0)
+    {
+        WiFi.mode(WIFI_STA);
+        WiFi.setSleep(false);
+        WiFi.scanDelete();
+        // Include hidden APs and use a longer active dwell time; the default scan
+        // can miss beacons badly when it starts just after a disconnect.
+        int16_t result = WiFi.scanNetworks(true, true, false, 500);
+        scanRunning = result == WIFI_SCAN_RUNNING || result >= 0;
+        scanPending = false;
+        worker.scanning = scanRunning;
+        ++scanAttempts;
+        if (!scanRunning)
+        {
+            if (scanAttempts < 3) { scanPending = true; scanReadyAt = millis() + 500; worker.scanning = true; }
+            else strlcpy(worker.error, "WiFi scan failed. Press R to retry.", sizeof(worker.error));
+        }
     }
     if (scanRunning)
     {
@@ -163,11 +199,22 @@ void service()
                 [](const Network& a, const Network& b) { return a.rssi > b.rssi; });
             WiFi.scanDelete();
             scanRunning = worker.scanning = false;
+            WiFi.setSleep(true);
+            if (!worker.count && scanAttempts < 3)
+            {
+                scanPending = true;
+                scanReadyAt = millis() + 500;
+                worker.scanning = true;
+            }
+            else if (!worker.count)
+                strlcpy(worker.error, "No AP found after 3 scans", sizeof(worker.error));
         }
         else if (result != WIFI_SCAN_RUNNING)
         {
             scanRunning = worker.scanning = false;
-            strlcpy(worker.error, "WiFi scan failed", sizeof(worker.error));
+            WiFi.setSleep(true);
+            if (scanAttempts < 3) { scanPending = true; scanReadyAt = millis() + 500; worker.scanning = true; }
+            else strlcpy(worker.error, "WiFi scan failed. Press R to retry.", sizeof(worker.error));
         }
     }
     worker.connected = WiFi.status() == WL_CONNECTED &&
@@ -177,6 +224,7 @@ void service()
         strlcpy(worker.ssid, WiFi.SSID().c_str(), sizeof(worker.ssid));
         strlcpy(worker.ip, WiFi.localIP().toString().c_str(), sizeof(worker.ip));
         worker.connecting = false;
+        worker.configured = true;
         WiFi.setAutoReconnect(true);
         if (savingPending)
         {

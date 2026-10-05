@@ -762,13 +762,14 @@ void drawMapScreen()
                  followGPS ? (observerPosition.fromGPS ? "" : "Poprad") : "PAN");
     drawHeader(title);
     d.setTextColor(CYAN, BLACK); d.setCursor(229, 16); d.print("N");
-    d.setTextColor(ORANGE, BLACK); d.setClipRect(0, 124, outlineMode ? 70 : 56, 11); d.setCursor(2, 126);
-    if (!wifiView.connected) d.print("No WiFi");
+    d.setTextColor(ORANGE, BLACK); d.setClipRect(0, 124, wifiView.configured ? (outlineMode ? 70 : 56) : 240, 11); d.setCursor(2, 126);
+    if (!wifiView.configured) d.print("No WiFi - press Opt, select network");
+    else if (!wifiView.connected) d.print("No WiFi");
     else if (statusText[0]) d.print(statusText);
     else d.printf("%lus ago", (millis() - lastSuccess) / 1000);
     d.clearClipRect(); d.setTextColor(WHITE, BLACK);
-    if (outlineMode) { d.setCursor(80, 126); d.print("NE / (c) GeoNames"); }
-    else { d.setCursor(58, 126); d.print("(c) OpenStreetMap contributors"); }
+    if (wifiView.configured && outlineMode) { d.setCursor(80, 126); d.print("NE / (c) GeoNames"); }
+    else if (wifiView.configured) { d.setCursor(58, 126); d.print("(c) OpenStreetMap contributors"); }
 
     if (!outlineMode && OnlineMap::status()[0])
     {
@@ -928,7 +929,8 @@ void drawWifiList()
         d.fillRect(0, y - 2, 240, 16, bg); d.setTextColor(i == wifiRow ? YELLOW : WHITE, bg);
         const auto& n = wifiView.networks[i];
         d.setCursor(4, y); d.printf("%c %.23s", n.secured ? '*' : ' ', n.ssid);
-        d.setCursor(178, y); d.printf("%d dBm", n.rssi);
+        const char* strength = n.rssi >= -55 ? "+++" : n.rssi >= -67 ? "++" : n.rssi >= -78 ? "+" : "-";
+        d.setCursor(166, y); d.printf("%-3s%4d", strength, n.rssi);
     }
     drawFooter("Enter:connect R:scan Esc:menu");
 }

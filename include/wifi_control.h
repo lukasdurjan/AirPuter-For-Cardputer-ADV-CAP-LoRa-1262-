@@ -7,7 +7,7 @@ struct Network { char ssid[33] = {}; int rssi = 0; bool secured = false; };
 struct Snapshot {
     Network networks[MAX_NETWORKS];
     int count = 0;
-    bool scanning = false, connecting = false, connected = false;
+    bool scanning = false, connecting = false, connected = false, configured = false;
     uint32_t connectionId = 0;
     char ssid[33] = {}, ip[16] = {}, error[64] = {};
 };
