@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.17 — 2026-10-14
+
+- Added resource-light dead reckoning of aircraft positions between ADS-B refreshes, rendered at up to 4 FPS and capped at 60 seconds. Every successful response resets aircraft to real server positions.
+- Added automatic clean retry for aircraft-photo `HTTP -1` connection failures and incomplete JPEG transfers, including JPEG end-marker validation.
+- Started GPS parsing during the splash screen and added Serial Monitor diagnostics for satellites, HDOP, data age, fix acquisition and fix loss.
+- Added colour-coded GPS quality, permanent map-centre crosshair, compact `Follow` / `Free View` state and coloured follow brackets.
+- Changed `C` to toggle GPS Follow. Free View retains the last displayed GPS position, while panning is disabled during Follow.
+- Added a persistent custom Home fallback while retaining Poprad when no Home is configured.
+- Added ten persistent Favorite Places: tap `0`–`9` to open, hold a number for 800 ms to save the current map centre, and beep after a successful save.
+- Added a Favorite Places overview to Settings and documented all updated controls.
+- Improved Wi-Fi-not-configured guidance and retained the earlier reliable scan and map PNG/TLS heap fixes.
+- Skipped unpublished versions `v1.0.15` and `v1.0.16`; automated release selection advances directly from `v1.0.14` to `v1.0.17`.
+
 ## 2026-10-04
 
 - Documented server-side HTTP 429 rate limits, automatic recovery, and stale aircraft data during cooldown.

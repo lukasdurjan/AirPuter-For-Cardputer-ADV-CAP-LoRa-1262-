@@ -26,21 +26,32 @@ See the [official esptool flashing documentation](https://docs.espressif.com/pro
 
 AirPuter shows nearby aircraft directly on the Cardputer display using live ADS-B data. It includes an interactive OpenStreetMap view, a lightweight outline map, a sortable flight list, aircraft details, and GPS support through the Cardputer LoRa/GPS CAP.
 
+## Version 1.0.17 highlights
+
+- Smoother live map: aircraft positions are dead-reckoned between ADS-B responses from groundspeed, track and data age. Prediction is capped at 60 seconds and resets to every newly received real position.
+- More reliable photos: transient `HTTP -1` connection failures and incomplete JPEG transfers receive one clean automatic retry. A complete JPEG end marker is accepted even when a proxy reports a slightly incorrect content length.
+- Faster and clearer GPS operation: NMEA parsing starts during the splash screen, quality and time-to-fix diagnostics are available in Serial Monitor, and the GPS indicator distinguishes searching, weak and quality fixes by colour.
+- `C` toggles GPS Follow and Free View. Follow blocks panning; disabling it retains the last displayed GPS position instead of jumping to a fallback.
+- A permanent centre crosshair, compact `Follow` / `Free View` label and coloured follow brackets make the current map state visible without a large status panel.
+- Persistent custom Home position and ten Favorite Places. Tap `0`–`9` to open a favorite or hold a number to save the current map centre; successful saves beep once.
+
 ## Features
 
 - Live nearby-aircraft tracking using the ADSB.lol API
 - OpenStreetMap raster map with aircraft position and track
 - Lightweight outline-map mode with country outlines and city labels
 - Map pan and 5 / 10 / 25 / 50 / 100 / 200 NM zoom levels
+- Continuous on-device aircraft position prediction between network refreshes
 - Nearby-flight list sorted by distance from the observer
 - Global SQUAWK7500 list available from the Tab screen cycle; select an aircraft and press `Enter` to keep the map centred on its live position
 - Persistent display Auto Dim setting: 30, 60, 120 seconds or Off
-- Persistent aircraft refresh interval setting: 1, 2, 5, 10 or 30 seconds (10 seconds by default)
+- Persistent aircraft refresh interval setting: 10, 15, 20, 25 or 30 seconds (10 seconds by default)
 - Detailed aircraft view: callsign, ICAO, registration, type, route, distance/bearing, altitude, groundspeed, track, vertical speed, squawk, coordinates, emergency state and data age when available
 - Hold `Alt` on an active flight detail to temporarily show its aircraft photo; release it to return to the data
 - Route lookup through ADSB.lol VRS standing data
 - GPS input through the LoRa/GPS CAP (UART RX on GPIO 15, 115200 baud)
-- Automatic Poprad, Slovakia fallback position when no valid GPS fix is available
+- Persistent user-defined Home fallback, with Poprad, Slovakia retained as the factory default
+- Ten persistent Favorite Places assigned to number keys `0`–`9`
 - Wi-Fi network scanner and on-device password entry
 - Saved Wi-Fi credentials after a successful connection
 - Map mode preference retained across restarts
@@ -58,8 +69,11 @@ The current PlatformIO target is `m5stack-stamps3` and uses the `M5Cardputer` li
 
 | Key | Action |
 | --- | --- |
-| Arrow keys | Pan map; move through lists/menus |
+| Arrow keys | Pan map when GPS follow is off; move through lists/menus |
 | `I` / `O` | Zoom in / out |
+| `C` | Toggle GPS follow; disabling it keeps the last displayed GPS position |
+| Short `0`–`9` | Open the corresponding saved Favorite Place |
+| Hold `0`–`9` | Save the current map centre to the corresponding Favorite Place |
 | `Opt` | Open settings / return from settings |
 | `Tab` | Cycle map, flight list and global SQUAWK7500 list; details → map |
 | `Enter` | Open a normal selected flight; in SQUAWK7500 start map tracking; activate a menu item |
@@ -70,7 +84,9 @@ The current PlatformIO target is `m5stack-stamps3` and uses the `M5Cardputer` li
 
 Aircraft photos and photographer credits are provided by the PlaneSpotters.net public photo API and require Wi-Fi.
 
-The flight list follows the current map viewport and refreshes with incoming aircraft data. Zooming and panning immediately filter cached aircraft; ADS-B requests wait for the configured refresh timer. The query covers the viewport corners. Up to 50 visible aircraft are retained using stable sampling across the complete response; busy areas can contain more aircraft than displayed. Zooming out fills newly visible areas on the next successful refresh.
+Photo lookup and image download use a single clean retry for a transient connection-refused (`HTTP -1`) failure. If a transfer ends before a complete JPEG is received, AirPuter discards the partial buffer and downloads it again. Intermediate retry details are written only to Serial Monitor.
+
+The flight list follows the current map viewport and refreshes with incoming aircraft data. Zooming and panning immediately filter cached aircraft; ADS-B requests wait for the configured refresh timer. Between responses, AirPuter advances moving aircraft locally using their reported groundspeed, track and position age, refreshing the map at up to 4 FPS. Every successful ADS-B response replaces predictions with real positions. Prediction stops after 60 seconds so stale aircraft cannot continue indefinitely. The query covers the viewport corners. Up to 50 visible aircraft are retained using stable sampling across the complete response; busy areas can contain more aircraft than displayed. Zooming out fills newly visible areas on the next successful refresh.
 
 ### API rate limits (HTTP 429)
 
@@ -78,7 +94,7 @@ HTTP 429 ("Too Many Requests") means ADSB.lol has temporarily limited requests. 
 
 AirPuter automatically pauses both nearby-aircraft and SQUAWK7500 requests for 60 seconds after a 429. Further 429 responses extend the shared pause to 120, 240 and at most 300 seconds. A successful aircraft response resets the next backoff to 60 seconds. The selected Refresh Interval stays saved and unchanged.
 
-During this pause, the last successfully received aircraft data remains available, but positions are not live. The nearby-aircraft status shows "Rate limited - automatic pause" after a nearby request receives 429. Zooming or panning does not bypass the pause or trigger an early ADS-B request. Updates resume automatically; a restart is unnecessary. Choosing a longer Refresh Interval can reduce request pressure. An actual device restart is a separate fault and should not be treated as normal rate-limit behavior.
+During this pause, the last successfully received aircraft data remains available. Moving positions continue to be estimated for at most 60 seconds from the last real update, then stop until fresh data arrives. The nearby-aircraft status shows "Rate limited - automatic pause" after a nearby request receives 429. Zooming or panning does not bypass the pause or trigger an early ADS-B request. Updates resume automatically; a restart is unnecessary. Choosing a longer Refresh Interval can reduce request pressure. An actual device restart is a separate fault and should not be treated as normal rate-limit behavior.
 
 ## Map modes
 
@@ -98,7 +114,9 @@ A compact built-in black map with country outlines and city labels. It does not 
 
 ## GPS
 
-AirPuter listens for NMEA GPS data at **115200 baud** on **GPIO 15**. A recent valid GPS fix becomes the observer position and the map follows it by default.
+AirPuter listens for NMEA GPS data at **115200 baud** on **GPIO 15**. UART reception and NMEA parsing start before the splash screen, allowing acquisition to proceed while the splash is visible. A recent valid GPS fix becomes the observer position and the map follows it by default.
+
+The header GPS dot pulses red while searching, turns orange for a valid but weaker fix, and green for a quality fix. Serial Monitor reports received characters, satellite count, HDOP, data age, fix loss and time to first fix. No factory-reset command is sent to the GNSS receiver.
 
 Without a valid GPS fix, AirPuter falls back to:
 
@@ -106,7 +124,15 @@ Without a valid GPS fix, AirPuter falls back to:
 49.0550 N, 20.3010 E
 ```
 
-This is the default Poprad-area position and can be changed in `src/app.cpp`.
+This is the default Poprad-area position. **Set home position** in the settings menu accepts coordinates in
+`latitude,longitude` format and saves them on the device as the fallback position. If no custom home position
+has been saved, the Poprad fallback remains unchanged.
+
+**Favorite Places** provides ten persistent slots assigned to keys `0`–`9`. Tap a number to move the map to
+that saved position, or hold it for 800 ms to store the current map centre. A short beep confirms a successful save. The **Favorite Places** settings screen lists all ten slots. Panning is disabled while GPS follow is active;
+press `C` first to stop following while retaining the last displayed GPS position.
+
+The centre of the map is always marked by a fixed white crosshair with a yellow centre. A small cyan `Follow` or grey `Free View` label shows the active navigation mode. Coloured corner brackets around the observer appear only while a valid GPS fix is actively followed.
 
 ## Building with PlatformIO
 
@@ -176,7 +202,7 @@ git commit -m "Update release firmware"
 git push origin main
 ```
 
-After every push to `main`, GitHub Actions builds the firmware, finds the highest existing `vMAJOR.MINOR.PATCH` tag and increases its patch number. For example, `v1.0.1` becomes `v1.0.2`. The workflow embeds that version in the firmware, commits the generated `release/AirPuter.bin` and version header back to `main`, creates the matching tag, and uploads the BIN as the newest GitHub Release. With no version tags, the first release is `v1.0.0`. No manual tagging or binary commit is needed.
+After every push to `main`, GitHub Actions builds the firmware, finds the highest existing `vMAJOR.MINOR.PATCH` tag and increases its patch number. The current release floor intentionally advances from `v1.0.14` directly to `v1.0.17`; after that release, normal patch increments continue with `v1.0.18`. The workflow embeds that version in the firmware, commits the generated `release/AirPuter.bin` and version header back to `main`, creates the matching tag, and uploads the BIN as the newest GitHub Release. No manual tagging or binary commit is needed.
 
 The repository must allow GitHub Actions to write repository contents. This is configured under **Settings → Actions → General → Workflow permissions → Read and write permissions**. A protected `main` branch must also allow the GitHub Actions bot to push the generated binary commit.
 

@@ -1,46 +1,38 @@
-AirPuter controls
+# AirPuter controls
 
-At startup, a short splash screen displays `Coffee flies the World` and
-`https://ko-fi.com/lukaslukee` before the map starts.
+At startup, the splash screen displays `Coffee flies the World` and starts GPS/NMEA processing in the background before the map appears.
 
 | Key | Action |
 | --- | --- |
-| Arrows (`;`, `.`, `,`, `/` on the Cardputer) | Pan the map; holding repeats movement. In lists and menus, up/down move exactly one item. The printed arrow keys work with or without Fn. |
-| I / O | Zoom the map in/out (5–200 NM). |
-| Opt | Open settings, or close settings to the previous screen. |
-| Tab | Cycle map → flight list → global SQUAWK7500 list → map; from details return to the map. |
-| Enter | Open a selected nearby flight; in SQUAWK7500 track the selected aircraft on the map; activate a menu/network item. |
-| Hold Alt | Temporarily show the aircraft photo from an active flight detail; release to return. |
-| W / A | Increase / decrease custom ATC stream volume. |
-| Esc (top-left key, optionally with Fn) | Details → list; WiFi screens → previous menu. On the map, restore GPS following. Password entry requires Fn+Esc so a plain backtick can be typed. |
-| R in the WiFi list | Scan for networks again. |
-| Backspace in the password form | Delete a character. |
+| Arrows (`;`, `.`, `,`, `/`) | Pan in Free View; holding repeats movement. Panning is blocked during GPS Follow. Up/down navigate lists and menus. |
+| `C` | Toggle GPS Follow and Free View. Follow requires a valid fix; disabling it retains the last displayed GPS position. |
+| `I` / `O` | Zoom the map between 5 and 200 NM. |
+| Tap `0`–`9` | Open the corresponding saved Favorite Place. An empty slot does nothing. |
+| Hold `0`–`9` for 800 ms | Save the current map centre to the corresponding Favorite Place. A short beep confirms success. |
+| `Opt` | Open settings, or close settings to the previous screen. |
+| `Tab` | Cycle map → flight list → global SQUAWK7500 list → map; details → map. |
+| `Enter` | Open a selected nearby flight; track a selected SQUAWK7500 aircraft; activate a menu or network item. |
+| Hold `Alt` | Temporarily show the aircraft photo from an active flight detail; release to return. |
+| `Esc` | Details → list; Wi-Fi screens → previous menu; on the map restore GPS Follow when a fix is available. Password entry requires Fn+Esc. |
+| `R` in Wi-Fi list | Scan for networks again. |
+| `Backspace` | Delete a character in password or Home-position entry. |
 
-Settings include Tiles/Outline, WiFi networks, Center on GPS, persistent Auto Dim
-(30/60/120s/Off), ATC On/Off, a custom ATC Source URL and Back. ATC is Off by
-default. Source URL, enabled state and volume persist across restarts. Only use
-streams you are authorized to access.
-Outline is a black map with city labels and country outlines, with no raster
-tile downloads. The setting survives restart. Open networks connect directly;
-protected networks prompt for a masked password. Successfully connected WiFi
-credentials are retained for the next startup, falling back to `src/main.cpp`
-settings if no saved credentials exist.
+## Map navigation indicators
 
-The aircraft list is sorted by distance from the current LoraCap GPS position,
-or Poprad when GPS has no valid fix. Panning only changes the map viewport.
-The selected aircraft is tracked by its ICAO identifier across downloads, and
-distances are recalculated as the device moves. When details are opened, the
-first row loads the departure and arrival airport for the selected callsign.
-Details also include callsign, ICAO, registration, type, distance/bearing, altitude, groundspeed, track,
-vertical speed, squawk, coordinates, emergency and data age when available.
+- A fixed white crosshair with a yellow centre always marks the map centre.
+- `Follow` in cyan means the map follows GPS and panning is locked.
+- `Free View` in grey means panning is enabled.
+- Corner brackets around the observer show active GPS Follow: cyan for a quality fix and orange for a weaker valid fix.
+- The GPS header dot pulses red while searching, is orange for a weaker valid fix, and green for a quality fix.
 
-In the global SQUAWK7500 list, use Up/Down to select an aircraft and press
-Enter to follow it on the map. The map remains centred on each refreshed
-position. Press Esc on the map to stop tracking and return to GPS centring.
-Route data comes from the ADSB.lol VRS standing-data service. Missing fields
-display `--`. If the flight disappears from the latest response,
-its open detail remains visible with a `Last position` label.
+## Settings
 
-WiFi scanning, connection, map downloads and aircraft downloads run on the
-network worker. GPS and the UI keep updating. Map tiles are only requested
-while the tile map is visible.
+Settings include Tiles/Outline, Wi-Fi networks, Center on GPS, Set home position, Favorite Places, persistent Auto Dim (30/60/120 seconds/Off), Refresh Interval (10/15/20/25/30 seconds), and Back.
+
+`Set home position` accepts `latitude,longitude` and stores it in NVS. It replaces the Poprad fallback only after valid coordinates are saved. `Favorite Places` displays all ten persistent number-key slots.
+
+The aircraft list follows the current viewport and sorts aircraft by distance from the observer. Panning and zooming re-filter cached aircraft without bypassing the configured ADS-B refresh timer. Moving aircraft are predicted between real responses for at most 60 seconds.
+
+In the global SQUAWK7500 list, select an aircraft and press `Enter` to follow it on the map. Press `C` with a valid GPS fix or `Esc` to leave aircraft tracking and restore GPS Follow.
+
+Wi-Fi scanning, connection, map downloads, aircraft requests, routes and photos run on the network worker. GPS and UI processing remain responsive. Photo download transport failures and incomplete transfers receive one automatic clean retry.

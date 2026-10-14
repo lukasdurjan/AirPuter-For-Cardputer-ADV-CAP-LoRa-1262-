@@ -3,6 +3,8 @@
 import re
 import subprocess
 
+MINIMUM_NEXT_VERSION = (1, 0, 17)
+
 
 def next_version(tags):
     versions = []
@@ -11,9 +13,12 @@ def next_version(tags):
         if match:
             versions.append(tuple(map(int, match.groups())))
     if not versions:
-        return "v1.0.0"
-    major, minor, patch = max(versions)
-    return f"v{major}.{minor}.{patch + 1}"
+        candidate = (1, 0, 0)
+    else:
+        major, minor, patch = max(versions)
+        candidate = (major, minor, patch + 1)
+    major, minor, patch = max(candidate, MINIMUM_NEXT_VERSION)
+    return f"v{major}.{minor}.{patch}"
 
 
 if __name__ == "__main__":

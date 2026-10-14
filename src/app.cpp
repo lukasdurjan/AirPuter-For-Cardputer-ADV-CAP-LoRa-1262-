@@ -6,6 +6,7 @@
 #include <TinyGPS++.h>
 #include <Preferences.h>
 #include <algorithm>
+#include <cstdlib>
 #include "online_map.h"
 #include "outline_map.h"
 #include "flight_data.h"
@@ -22,6 +23,10 @@ constexpr uint32_t GPS_MAX_AGE_MS = 5000;
 constexpr size_t MAX_PHOTO_BYTES = 45000;
 constexpr int ZOOM_RADII[] = {5, 10, 25, 50, 100, 200};
 constexpr uint16_t REFRESH_INTERVALS[] = {10, 15, 20, 25, 30};
+constexpr float MAX_POSITION_PREDICTION_SECONDS = 60.0f;
+constexpr uint32_t LIVE_MAP_FRAME_MS = 250;
+constexpr uint32_t LONG_PRESS_MS = 800;
+constexpr int FAVORITE_COUNT = 10;
 constexpr char API_USER_AGENT[] = "AirPuter/1.0";
 constexpr char PHOTO_USER_AGENT[] = "AirPuter/1.0 (+https://ko-fi.com/lukaslukee)";
 constexpr char FIRMWARE_VERSION[] = "AirPuter " AIRPUTER_VERSION;
@@ -61,13 +66,25 @@ struct PhotoResult {
     char hex[9] = {}, photographer[40] = {}, error[40] = {};
 };
 
+struct GpsStatus {
+    uint32_t characters = 0;
+    uint32_t age = UINT32_MAX;
+    uint16_t satellites = 0;
+    float hdop = NAN;
+    bool fix = false;
+    bool quality = false;
+};
+
 HardwareSerial gpsSerial(1);
 portMUX_TYPE gpsMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE resultMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE viewMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE routeMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE photoMux = portMUX_INITIALIZER_UNLOCKED;
-Position gpsPosition, observerPosition, viewPosition;
+Position gpsPosition, homePosition, observerPosition, viewPosition;
+Position lastGpsView;
+Position favoritePlaces[FAVORITE_COUNT];
+GpsStatus gpsStatus;
 Position aircraftRequestCenter;
 MapProjection::View projection(HOME_LAT, HOME_LON, 50);
 TaskHandle_t networkHandle = nullptr;
@@ -91,6 +108,9 @@ uint16_t refreshSeconds = 10;
 uint32_t lastInputAt = 0;
 bool displayDimmed = false;
 bool settingsReady = false;
+bool homePositionSet = false;
+bool lastGpsViewValid = false;
+bool favoriteSet[FAVORITE_COUNT] = {};
 Preferences settings;
 
 UiScreen uiScreen = UiScreen::Map, menuReturn = UiScreen::Map;
@@ -113,7 +133,25 @@ char photoHex[9] = {}, photoPhotographer[40] = {}, photoStatus[40] = {};
 WifiControl::Snapshot wifiView;
 WifiControl::Network chosenNetwork;
 char wifiPassword[65] = {}, wifiMessage[64] = {};
+char homePositionInput[40] = {}, homePositionMessage[48] = {};
 uint32_t pendingConnectionId = 0;
+
+void wakeNetwork();
+
+Position displayedPosition(const Aircraft& aircraft, uint32_t receivedAt)
+{
+    float seconds = receivedAt ? (millis() - receivedAt) / 1000.0f : 0.0f;
+    if (isfinite(aircraft.seenPosition) && aircraft.seenPosition > 0)
+        seconds += aircraft.seenPosition;
+    return predictPosition(aircraft, std::min(seconds, MAX_POSITION_PREDICTION_SECONDS));
+}
+
+bool mapHasMovingAircraft()
+{
+    for (int i = 0; i < radar.count; ++i)
+        if (canPredictPosition(radar.aircraft[i])) return true;
+    return trackingSquawk7500 && trackedSquawkLive;
+}
 lgfx::LovyanGFX& screen()
 {
     if (canvasReady) return canvas;
@@ -125,17 +163,67 @@ Position readPosition()
     portENTER_CRITICAL(&gpsMux);
     Position position = gpsPosition;
     portEXIT_CRITICAL(&gpsMux);
-    return position;
+    return position.fromGPS ? position : homePosition;
+}
+
+GpsStatus readGpsStatus()
+{
+    portENTER_CRITICAL(&gpsMux);
+    GpsStatus status = gpsStatus;
+    portEXIT_CRITICAL(&gpsMux);
+    return status;
+}
+
+bool centerOnGPS()
+{
+    portENTER_CRITICAL(&gpsMux);
+    Position position = gpsPosition;
+    portEXIT_CRITICAL(&gpsMux);
+    if (!position.fromGPS)
+    {
+        Serial.println("Center on GPS ignored: no valid GPS fix");
+        return false;
+    }
+    trackingSquawk7500 = false;
+    trackedSquawkLive = false;
+    trackedSquawkHex[0] = '\0';
+    followGPS = true;
+    observerPosition = position;
+    viewPosition = position;
+    lastGpsView = position;
+    lastGpsViewValid = true;
+    wakeNetwork();
+    return true;
+}
+
+bool toggleGpsFollow()
+{
+    if (followGPS)
+    {
+        followGPS = false;
+        // viewPosition already contains the last position actually drawn.
+        return true;
+    }
+    return centerOnGPS();
 }
 
 void gpsTask(void*)
 {
     TinyGPSPlus gps;
+    uint32_t startedAt = millis(), lastReport = 0;
+    bool previousFix = false;
     for (;;)
     {
         while (gpsSerial.available()) gps.encode(gpsSerial.read());
         Position position;
-        if (gps.location.isValid() && gps.location.age() < GPS_MAX_AGE_MS)
+        GpsStatus status;
+        status.characters = gps.charsProcessed();
+        status.age = gps.location.isValid() ? gps.location.age() : UINT32_MAX;
+        status.satellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
+        status.hdop = gps.hdop.isValid() ? gps.hdop.hdop() : NAN;
+        status.fix = gps.location.isValid() && status.age < GPS_MAX_AGE_MS;
+        status.quality = status.fix && status.satellites >= 4 && isfinite(status.hdop) && status.hdop <= 5.0f;
+        if (status.fix)
         {
             position.lat = gps.location.lat();
             position.lon = gps.location.lng();
@@ -143,7 +231,28 @@ void gpsTask(void*)
         }
         portENTER_CRITICAL(&gpsMux);
         gpsPosition = position;
+        gpsStatus = status;
         portEXIT_CRITICAL(&gpsMux);
+
+        if (status.fix != previousFix)
+        {
+            if (status.fix)
+                Serial.printf("GPS fix acquired in %.1fs: sat=%u hdop=%.2f age=%lums\n",
+                              (millis() - startedAt) / 1000.0f, status.satellites, status.hdop,
+                              static_cast<unsigned long>(status.age));
+            else
+                Serial.printf("GPS fix lost: sat=%u hdop=%.2f age=%lums\n", status.satellites,
+                              status.hdop, static_cast<unsigned long>(status.age));
+            previousFix = status.fix;
+        }
+        if (millis() - lastReport >= (status.fix ? 30000U : 5000U))
+        {
+            Serial.printf("GPS %s: chars=%lu sat=%u hdop=%.2f age=%lums\n",
+                          status.fix ? (status.quality ? "quality" : "weak") : "searching",
+                          static_cast<unsigned long>(status.characters), status.satellites, status.hdop,
+                          static_cast<unsigned long>(status.age));
+            lastReport = millis();
+        }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -394,12 +503,24 @@ bool downloadPhoto(const PhotoRequest& request, PhotoResult& result, uint8_t* da
     lookup.setUserAgent(PHOTO_USER_AGENT);
     lookup.useHTTP10(true);
     lookup.setConnectTimeout(8000); lookup.setTimeout(8000);
-    if (!lookup.begin(lookupUrl))
-    { strlcpy(result.error, "Photo lookup failed", sizeof(result.error)); return false; }
-    lookup.addHeader("Accept", "application/json");
-    int code = lookup.GET();
+    int code = HTTPC_ERROR_CONNECTION_REFUSED;
+    for (int attempt = 1; attempt <= 2; ++attempt)
+    {
+        if (!lookup.begin(lookupUrl))
+        { strlcpy(result.error, "Photo lookup failed", sizeof(result.error)); return false; }
+        lookup.addHeader("Accept", "application/json");
+        code = lookup.GET();
+        if (code != HTTPC_ERROR_CONNECTION_REFUSED || attempt == 2) break;
+        Serial.printf("Photo lookup HTTP -1 (%s), retrying\n",
+                      HTTPClient::errorToString(code).c_str());
+        lookup.end();
+        delay(350);
+    }
     if (code != HTTP_CODE_OK)
     {
+        if (code < 0)
+            Serial.printf("Photo lookup failed: %d (%s)\n", code,
+                          HTTPClient::errorToString(code).c_str());
         snprintf(result.error, sizeof(result.error), "Photo lookup HTTP %d", code);
         lookup.end(); return false;
     }
@@ -430,27 +551,57 @@ bool downloadPhoto(const PhotoRequest& request, PhotoResult& result, uint8_t* da
     image.useHTTP10(true);
     image.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     image.setConnectTimeout(8000); image.setTimeout(8000);
-    if (!image.begin(url))
-    { strlcpy(result.error, "Photo download failed", sizeof(result.error)); return false; }
-    image.addHeader("Accept", "image/jpeg,image/*;q=0.8");
-    image.addHeader("Referer", "https://www.planespotters.net/");
-    code = image.GET();
-    int length = image.getSize();
-    if (code != HTTP_CODE_OK || length <= 0 || length > int(MAX_PHOTO_BYTES))
+    code = HTTPC_ERROR_CONNECTION_REFUSED;
+    for (int attempt = 1; attempt <= 2; ++attempt)
     {
-        snprintf(result.error, sizeof(result.error), "Photo HTTP %d", code);
-        image.end(); return false;
+        if (!image.begin(url))
+        { strlcpy(result.error, "Photo download failed", sizeof(result.error)); return false; }
+        image.addHeader("Accept", "image/jpeg,image/*;q=0.8");
+        image.addHeader("Referer", "https://www.planespotters.net/");
+        code = image.GET();
+        if (code == HTTPC_ERROR_CONNECTION_REFUSED && attempt == 1)
+        {
+            Serial.printf("Photo image HTTP -1 (%s), retrying\n",
+                          HTTPClient::errorToString(code).c_str());
+            image.end(); delay(350); continue;
+        }
+        int length = image.getSize();
+        if (code != HTTP_CODE_OK || length <= 0 || length > int(MAX_PHOTO_BYTES))
+        {
+            if (code < 0)
+                Serial.printf("Photo image failed: %d (%s)\n", code,
+                              HTTPClient::errorToString(code).c_str());
+            snprintf(result.error, sizeof(result.error), "Photo HTTP %d", code);
+            image.end(); return false;
+        }
+
+        size_t received = image.getStreamPtr()->readBytes(data, length);
+        image.end();
+        bool completeJpeg = received >= 4 && data[0] == 0xFF && data[1] == 0xD8 &&
+                            data[received - 2] == 0xFF && data[received - 1] == 0xD9;
+        // A complete JPEG is usable even if a proxy advertised a slightly larger
+        // Content-Length. The EOI marker is the authoritative end of the image.
+        if (completeJpeg)
+        {
+            if (received != size_t(length))
+                Serial.printf("Photo length mismatch accepted: %u/%d bytes with JPEG EOI\n",
+                              unsigned(received), length);
+            result.size = received;
+            result.success = result.found = true;
+            return true;
+        }
+        if (attempt == 1)
+        {
+            Serial.printf("Photo incomplete: %u/%d bytes, retrying clean connection\n",
+                          unsigned(received), length);
+            delay(350); continue;
+        }
+        strlcpy(result.error, received != size_t(length) ? "Incomplete photo" : "Invalid JPEG data",
+                sizeof(result.error));
+        return false;
     }
-    size_t received = image.getStreamPtr()->readBytes(data, length);
-    image.end();
-    if (received != size_t(length))
-    { strlcpy(result.error, "Incomplete photo", sizeof(result.error)); return false; }
-    if (received < 4 || data[0] != 0xFF || data[1] != 0xD8 ||
-        data[received - 2] != 0xFF || data[received - 1] != 0xD9)
-    { strlcpy(result.error, "Invalid JPEG data", sizeof(result.error)); return false; }
-    result.size = received;
-    result.success = result.found = true;
-    return true;
+    strlcpy(result.error, "Incomplete photo", sizeof(result.error));
+    return false;
 }
 
 void networkTask(void*)
@@ -547,11 +698,12 @@ void updateFlightOrder()
     visibleFlightCount = 0;
     for (int i = 0; i < radar.count; ++i)
     {
+        Position predicted = displayedPosition(radar.aircraft[i], lastSuccess);
         int x, y;
-        view.toScreen(radar.aircraft[i].lat, radar.aircraft[i].lon, x, y);
+        view.toScreen(predicted.lat, predicted.lon, x, y);
         if (x >= 0 && x < 240 && y >= 15 && y < 124)
             flightOrder[visibleFlightCount++] = i;
-        flightDistances[i] = distanceNM(observerPosition, radar.aircraft[i].lat, radar.aircraft[i].lon);
+        flightDistances[i] = distanceNM(observerPosition, predicted.lat, predicted.lon);
     }
     std::sort(flightOrder, flightOrder + visibleFlightCount, [](int a, int b) {
         if (flightDistances[a] == flightDistances[b])
@@ -708,7 +860,9 @@ void drawHeader(const char* title)
     else snprintf(batteryText, sizeof(batteryText), "%d%%", constrain(battery, 0, 100));
     d.setTextColor(battery >= 0 && battery <= 20 ? ORANGE : LIGHTGREY, BLACK);
     d.setCursor(198 - d.textWidth(batteryText), 2); d.print(batteryText);
-    uint16_t color = observerPosition.fromGPS ? GREEN : RED;
+    GpsStatus status = readGpsStatus();
+    uint16_t color = status.fix ? (status.quality ? GREEN : ORANGE) :
+                     ((millis() / 500) % 2 ? RED : 0x3000);
     d.fillCircle(205, 6, 3, color); d.setTextColor(color, BLACK);
     d.setCursor(212, 2); d.print("GPS");
 }
@@ -730,10 +884,24 @@ void drawMapScreen()
     d.fillCircle(ownX, ownY, 5, BLACK);
     d.drawLine(ownX - 4, ownY, ownX + 4, ownY, YELLOW);
     d.drawLine(ownX, ownY - 4, ownX, ownY + 4, YELLOW);
+    if (followGPS && observerPosition.fromGPS)
+    {
+        constexpr int inner = 8, outer = 12;
+        uint16_t followColor = readGpsStatus().quality ? CYAN : ORANGE;
+        d.drawLine(ownX - outer, ownY - outer, ownX - inner, ownY - outer, followColor);
+        d.drawLine(ownX - outer, ownY - outer, ownX - outer, ownY - inner, followColor);
+        d.drawLine(ownX + inner, ownY - outer, ownX + outer, ownY - outer, followColor);
+        d.drawLine(ownX + outer, ownY - outer, ownX + outer, ownY - inner, followColor);
+        d.drawLine(ownX - outer, ownY + outer, ownX - inner, ownY + outer, followColor);
+        d.drawLine(ownX - outer, ownY + inner, ownX - outer, ownY + outer, followColor);
+        d.drawLine(ownX + inner, ownY + outer, ownX + outer, ownY + outer, followColor);
+        d.drawLine(ownX + outer, ownY + inner, ownX + outer, ownY + outer, followColor);
+    }
     for (int i = 0; i < radar.count; ++i)
     {
         const Aircraft& p = radar.aircraft[i]; int x, y;
-        projection.toScreen(p.lat, p.lon, x, y);
+        Position predicted = displayedPosition(p, lastSuccess);
+        projection.toScreen(predicted.lat, predicted.lon, x, y);
         if (x < 0 || x >= 240 || y < 15 || y >= 124) continue;
         if (isfinite(p.track))
         {
@@ -749,13 +917,21 @@ void drawMapScreen()
         for (int i = 0; i < squawkRadar.count; ++i)
             if (strcmp(squawkRadar.aircraft[i].hex, trackedSquawkHex) == 0)
             {
+                Position predicted = displayedPosition(squawkRadar.aircraft[i], squawkLastSuccess);
                 int x, y;
-                projection.toScreen(squawkRadar.aircraft[i].lat, squawkRadar.aircraft[i].lon, x, y);
+                projection.toScreen(predicted.lat, predicted.lon, x, y);
                 d.drawCircle(x, y, 7, ORANGE);
                 d.drawCircle(x, y, 8, ORANGE);
                 break;
             }
     }
+    // The map-centre marker is independent from the observer marker. In Follow
+    // mode they overlap; in Free View this cross remains fixed while the
+    // observer can move elsewhere or leave the viewport.
+    d.fillCircle(120, 72, 5, BLACK);
+    d.drawLine(115, 72, 125, 72, WHITE);
+    d.drawLine(120, 67, 120, 77, WHITE);
+    d.drawPixel(120, 72, YELLOW);
     d.clearClipRect();
     char title[32];
     if (trackingSquawk7500)
@@ -763,8 +939,12 @@ void drawMapScreen()
                  trackedSquawkLive ? "" : " LOST");
     else
         snprintf(title, sizeof(title), "%dNM AC:%d %s", radiusNM, radar.count,
-                 followGPS ? (observerPosition.fromGPS ? "" : "Poprad") : "PAN");
+                 followGPS ? (observerPosition.fromGPS ? "" : (homePositionSet ? "Home" : "Poprad")) : "PAN");
     drawHeader(title);
+    const char* viewMode = followGPS ? "Follow" : "Free View";
+    d.fillRect(1, 15, 58, 10, BLACK);
+    d.setTextColor(followGPS ? CYAN : LIGHTGREY, BLACK);
+    d.setCursor(3, 16); d.print(viewMode);
     d.setTextColor(CYAN, BLACK); d.setCursor(229, 16); d.print("N");
     d.setTextColor(ORANGE, BLACK); d.setClipRect(0, 124, wifiView.configured ? (outlineMode ? 70 : 56) : 240, 11); d.setCursor(2, 126);
     if (!wifiView.configured) d.print("No WiFi - press Opt, select network");
@@ -823,9 +1003,10 @@ void drawSquawk7500Screen()
         uint16_t bg = row == squawkSelectedRow ? 0x2104 : BLACK;
         d.fillRect(0, y - 2, 240, 16, bg); d.setTextColor(row == squawkSelectedRow ? YELLOW : WHITE, bg);
         const Aircraft& p = squawkRadar.aircraft[row];
+        Position predicted = displayedPosition(p, squawkLastSuccess);
         drawScrollingText(flightName(p), 5, y, 76, row == squawkSelectedRow);
         d.setCursor(87, y); d.printf("%-5.5s", p.type[0] ? p.type : "--");
-        d.setCursor(145, y); d.printf("%6.1f NM", distanceNM(observerPosition, p.lat, p.lon));
+        d.setCursor(145, y); d.printf("%6.1f NM", distanceNM(observerPosition, predicted.lat, predicted.lon));
     }
     drawFooter("Enter:track Tab:map Opt:menu");
 }
@@ -906,15 +1087,46 @@ void drawMenuScreen()
     char refreshText[28];
     snprintf(refreshText, sizeof(refreshText), "Refresh Interval: %us", refreshSeconds);
     const char* items[] = {outlineMode ? "Map: Outline" : "Map: Tiles", "Wi-Fi networks", "Center on GPS",
-                           dimText, refreshText, "Back"};
+                           "Set home position", "Favorite Places", dimText, refreshText, "Back"};
     int first = menuIndex < 5 ? 0 : menuIndex - 4;
-    for (int i = first; i < min(first + 5, 6); ++i)
+    for (int i = first; i < min(first + 5, 8); ++i)
     {
         int y = 21 + (i - first) * 20; uint16_t bg = i == menuIndex ? 0x2104 : BLACK;
         d.fillRect(0, y - 3, 240, 18, bg); d.setTextColor(i == menuIndex ? YELLOW : WHITE, bg);
         d.setCursor(7, y); d.print(items[i]);
     }
     drawFooter("Arrows/Enter  Opt/Esc:back");
+}
+
+void drawHomePositionScreen()
+{
+    auto& d = screen(); drawHeader("SET HOME POSITION");
+    d.setTextColor(LIGHTGREY, BLACK); d.setCursor(5, 22);
+    d.print("Enter latitude,longitude:");
+    d.setTextColor(WHITE, BLACK); d.setCursor(5, 44);
+    d.printf("%.38s", homePositionInput);
+    d.setTextColor(LIGHTGREY, BLACK); d.setCursor(5, 66);
+    if (homePositionSet)
+        d.printf("Current: %.5f, %.5f", homePosition.lat, homePosition.lon);
+    else
+        d.print("Current: Poprad fallback");
+    d.setTextColor(ORANGE, BLACK); d.setCursor(5, 88);
+    d.printf("%.46s", homePositionMessage);
+    drawFooter("Enter:save  Esc:cancel");
+}
+
+void drawFavoritePlacesScreen()
+{
+    auto& d = screen(); drawHeader("FAVORITE PLACES");
+    for (int i = 0; i < FAVORITE_COUNT; ++i)
+    {
+        int y = 17 + i * 10;
+        d.setTextColor(favoriteSet[i] ? WHITE : DARKGREY, BLACK);
+        d.setCursor(4, y);
+        if (favoriteSet[i]) d.printf("%d  % .5f, % .5f", i, favoritePlaces[i].lat, favoritePlaces[i].lon);
+        else d.printf("%d  -- empty --", i);
+    }
+    drawFooter("Tap 0-9:go  Hold 0-9:save");
 }
 
 void drawWifiList()
@@ -972,6 +1184,8 @@ void drawUI()
         case UiScreen::Squawk7500: drawSquawk7500Screen(); break;
         case UiScreen::Detail: drawDetailScreen(); break;
         case UiScreen::Menu: drawMenuScreen(); break;
+        case UiScreen::HomePosition: drawHomePositionScreen(); break;
+        case UiScreen::FavoritePlaces: drawFavoritePlacesScreen(); break;
         case UiScreen::WifiList: drawWifiList(); break;
         case UiScreen::WifiPassword: drawWifiPassword(); break;
         case UiScreen::WifiConnecting: drawWifiConnecting(); break;
@@ -1051,10 +1265,18 @@ void activateMenuItem()
     { uiScreen = UiScreen::WifiList; WifiControl::scan(); wakeNetwork(); }
     else if (menuIndex == 2)
     {
-        trackingSquawk7500 = false; trackedSquawkHex[0] = '\0';
-        followGPS = true; viewPosition = observerPosition; uiScreen = UiScreen::Map; wakeNetwork();
+        if (centerOnGPS()) uiScreen = UiScreen::Map;
     }
     else if (menuIndex == 3)
+    {
+        homePositionInput[0] = homePositionMessage[0] = '\0';
+        uiScreen = UiScreen::HomePosition;
+    }
+    else if (menuIndex == 4)
+    {
+        uiScreen = UiScreen::FavoritePlaces;
+    }
+    else if (menuIndex == 5)
     {
         const uint16_t values[] = {30, 60, 120, 0};
         int index = 0;
@@ -1063,7 +1285,7 @@ void activateMenuItem()
         if (settingsReady) settings.putUShort("autodim", autoDimSeconds);
         lastInputAt = millis();
     }
-    else if (menuIndex == 4)
+    else if (menuIndex == 6)
     {
         int index = 0;
         while (index < 5 && REFRESH_INTERVALS[index] != refreshSeconds) ++index;
@@ -1076,10 +1298,82 @@ void activateMenuItem()
     else uiScreen = menuReturn;
 }
 
+void saveFavorite(int slot)
+{
+    if (slot < 0 || slot >= FAVORITE_COUNT) return;
+    favoritePlaces[slot] = viewPosition;
+    favoritePlaces[slot].fromGPS = false;
+    favoriteSet[slot] = true;
+    if (settingsReady)
+    {
+        char key[12];
+        snprintf(key, sizeof(key), "fav%dLat", slot); settings.putDouble(key, favoritePlaces[slot].lat);
+        snprintf(key, sizeof(key), "fav%dLon", slot); settings.putDouble(key, favoritePlaces[slot].lon);
+        snprintf(key, sizeof(key), "fav%dSet", slot); settings.putBool(key, true);
+    }
+    Serial.printf("Favorite %d saved: %.6f, %.6f\n", slot,
+                  favoritePlaces[slot].lat, favoritePlaces[slot].lon);
+    M5Cardputer.Speaker.tone(4000, 60);
+}
+
+void openFavorite(int slot)
+{
+    if (slot < 0 || slot >= FAVORITE_COUNT || !favoriteSet[slot])
+    {
+        Serial.printf("Favorite %d is empty\n", slot);
+        return;
+    }
+    trackingSquawk7500 = false;
+    trackedSquawkLive = false;
+    trackedSquawkHex[0] = '\0';
+    followGPS = false;
+    viewPosition = favoritePlaces[slot];
+    uiScreen = UiScreen::Map;
+    wakeNetwork();
+}
+
+bool saveHomePosition()
+{
+    char* separator = nullptr;
+    double latitude = strtod(homePositionInput, &separator);
+    if (separator == homePositionInput)
+    { strlcpy(homePositionMessage, "Use format: 49.0550,20.3010", sizeof(homePositionMessage)); return false; }
+    while (*separator == ' ') ++separator;
+    if (*separator != ',')
+    { strlcpy(homePositionMessage, "Separate coordinates with comma", sizeof(homePositionMessage)); return false; }
+    char* end = nullptr;
+    double longitude = strtod(separator + 1, &end);
+    while (end && *end == ' ') ++end;
+    if (end == separator + 1 || (end && *end) || !isfinite(latitude) || !isfinite(longitude) ||
+        latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0)
+    { strlcpy(homePositionMessage, "Invalid latitude or longitude", sizeof(homePositionMessage)); return false; }
+
+    homePosition.lat = latitude;
+    homePosition.lon = longitude;
+    homePosition.fromGPS = false;
+    homePositionSet = true;
+    if (settingsReady)
+    {
+        settings.putDouble("homeLat", latitude);
+        settings.putDouble("homeLon", longitude);
+        settings.putBool("homeSet", true);
+    }
+    if (!readPosition().fromGPS)
+    {
+        observerPosition = homePosition;
+        if (followGPS) viewPosition = homePosition;
+    }
+    Serial.printf("Home position saved: %.6f, %.6f\n", latitude, longitude);
+    uiScreen = UiScreen::Menu;
+    wakeNetwork();
+    return true;
+}
+
 struct KeyEvents {
     bool up = false, down = false, left = false, right = false;
     bool tab = false, opt = false, enter = false, escape = false, backspace = false;
-    bool zoomIn = false, zoomOut = false, rescan = false;
+    bool zoomIn = false, zoomOut = false, rescan = false, centerGPS = false;
+    int favoriteOpen = -1, favoriteSave = -1;
     char text[57] = {};
 };
 
@@ -1089,6 +1383,9 @@ KeyEvents readKeys()
     static uint64_t previous = 0;
     static uint8_t direction = 0;
     static uint32_t repeatAt = 0;
+    static int heldFavorite = -1;
+    static uint32_t favoriteHeldAt = 0;
+    static bool favoriteLongSent = false;
     uint64_t held = 0, fresh = 0;
     auto& keyboard = M5Cardputer.Keyboard;
     for (const auto& point : keyboard.keyList()) held |= uint64_t(1) << (point.y * 14 + point.x);
@@ -1096,10 +1393,13 @@ KeyEvents readKeys()
     int characters = 0;
     uint8_t directions = 0;
     bool passwordScreen = uiScreen == UiScreen::WifiPassword;
-    bool textInputScreen = passwordScreen;
+    bool textInputScreen = passwordScreen || uiScreen == UiScreen::HomePosition;
+    bool favoriteControls = uiScreen == UiScreen::Map || uiScreen == UiScreen::FavoritePlaces;
+    int currentFavorite = -1;
     for (const auto& point : keyboard.keyList())
     {
         uint8_t raw = keyboard.getKeyValue(point).value_first;
+        if (favoriteControls && raw >= '0' && raw <= '9') currentFavorite = raw - '0';
         bool pressed = fresh & (uint64_t(1) << (point.y * 14 + point.x));
         // Cardputer's printed arrows are on ; (up), . (down), , (left), / (right).
         if (raw == ';') directions |= 1;
@@ -1107,6 +1407,7 @@ KeyEvents readKeys()
         if (raw == ',') directions |= 4;
         if (raw == '/') directions |= 8;
         if (!pressed) continue;
+        if (favoriteControls && raw >= '0' && raw <= '9') continue;
         if (raw == KEY_OPT) events.opt = true;
         else if (raw == KEY_TAB) events.tab = true;
         else if (raw == KEY_ENTER) events.enter = true;
@@ -1118,6 +1419,7 @@ KeyEvents readKeys()
             if (raw == 'i') events.zoomIn = true;
             if (raw == 'o') events.zoomOut = true;
             if (raw == 'r') events.rescan = true;
+            if (raw == 'c' && !textInputScreen) events.centerGPS = true;
         }
     }
     bool repeat = false;
@@ -1125,13 +1427,34 @@ KeyEvents readKeys()
     else if (direction && int32_t(millis() - repeatAt) >= 0) { repeat = true; repeatAt = millis() + 120; }
     if (repeat && !textInputScreen)
     { events.up = directions & 1; events.down = directions & 2; events.left = directions & 4; events.right = directions & 8; }
+    if (favoriteControls)
+    {
+        if (currentFavorite != heldFavorite)
+        {
+            if (heldFavorite >= 0 && !favoriteLongSent) events.favoriteOpen = heldFavorite;
+            heldFavorite = currentFavorite;
+            favoriteHeldAt = millis();
+            favoriteLongSent = false;
+        }
+        else if (heldFavorite >= 0 && !favoriteLongSent && millis() - favoriteHeldAt >= LONG_PRESS_MS)
+        {
+            events.favoriteSave = heldFavorite;
+            favoriteLongSent = true;
+        }
+    }
+    else
+    {
+        heldFavorite = -1;
+        favoriteLongSent = false;
+    }
     return events;
 }
 
 bool handleKeys(const KeyEvents& k)
 {
     bool changed = k.up || k.down || k.left || k.right || k.tab || k.opt || k.enter || k.escape ||
-                   k.zoomIn || k.zoomOut || k.rescan || k.backspace || k.text[0];
+                   k.zoomIn || k.zoomOut || k.rescan || k.centerGPS || k.backspace || k.text[0] ||
+                   k.favoriteOpen >= 0 || k.favoriteSave >= 0;
     if (!changed) return false;
     lastInputAt = millis();
     if (displayDimmed) { M5Cardputer.Display.setBrightness(128); displayDimmed = false; }
@@ -1150,8 +1473,7 @@ bool handleKeys(const KeyEvents& k)
     {
         if (uiScreen == UiScreen::Map)
         {
-            trackingSquawk7500 = false; trackedSquawkLive = false; trackedSquawkHex[0] = '\0';
-            followGPS = true; viewPosition = observerPosition;
+            centerOnGPS();
         }
         else uiScreen = escapeDestination(uiScreen, menuReturn);
         memset(wifiPassword, 0, sizeof(wifiPassword)); return true;
@@ -1169,22 +1491,35 @@ bool handleKeys(const KeyEvents& k)
         }
         return true;
     }
+    if (uiScreen == UiScreen::HomePosition)
+    {
+        size_t n = strlen(homePositionInput);
+        if (k.backspace && n) homePositionInput[--n] = '\0';
+        for (const char* c = k.text; *c && n < sizeof(homePositionInput) - 1; ++c)
+            if ((*c >= '0' && *c <= '9') || *c == '-' || *c == '+' || *c == '.' || *c == ',' || *c == ' ')
+                homePositionInput[n++] = *c;
+        homePositionInput[n] = '\0';
+        if (k.enter) saveHomePosition();
+        return true;
+    }
+    if (k.favoriteSave >= 0) { saveFavorite(k.favoriteSave); return true; }
+    if (k.favoriteOpen >= 0) { openFavorite(k.favoriteOpen); return true; }
     if (k.tab)
     { uiScreen = tabDestination(uiScreen); updateFlightOrder(); wakeNetwork(); return true; }
     if (uiScreen == UiScreen::Map)
     {
+        if (k.centerGPS) toggleGpsFollow();
         int nextZoom = constrain(zoomIndex + (k.zoomOut ? 1 : 0) - (k.zoomIn ? 1 : 0), 0, 5);
         if (nextZoom != zoomIndex)
         {
             zoomIndex = nextZoom; portENTER_CRITICAL(&viewMux);
             radiusNM = ZOOM_RADII[zoomIndex]; portEXIT_CRITICAL(&viewMux); wakeNetwork();
         }
-        if (!trackingSquawk7500 && (k.up || k.down || k.left || k.right))
+        if (!trackingSquawk7500 && !followGPS && (k.up || k.down || k.left || k.right))
         {
             MapProjection::View view(viewPosition.lat, viewPosition.lon, radiusNM);
             view.fromScreen(120 + (k.right - k.left) * 30, 72 + (k.down - k.up) * 30,
                             viewPosition.lat, viewPosition.lon);
-            followGPS = false;
         }
     }
     else if (uiScreen == UiScreen::List)
@@ -1214,8 +1549,8 @@ bool handleKeys(const KeyEvents& k)
     }
     else if (uiScreen == UiScreen::Menu)
     {
-        menuIndex = constrain(menuIndex + (k.down - k.up), 0, 5);
-        if (k.enter || ((k.left || k.right) && (menuIndex == 0 || menuIndex == 3 || menuIndex == 4))) activateMenuItem();
+        menuIndex = constrain(menuIndex + (k.down - k.up), 0, 7);
+        if (k.enter || ((k.left || k.right) && (menuIndex == 0 || menuIndex == 5 || menuIndex == 6))) activateMenuItem();
     }
     else if (uiScreen == UiScreen::WifiList)
     {
@@ -1256,6 +1591,9 @@ void setup()
 {
     M5Cardputer.begin(M5.config(), true); Serial.begin(115200); Serial.println(FIRMWARE_VERSION);
     HeapOperationGuard::begin();
+    gpsSerial.setRxBufferSize(2048); gpsSerial.begin(115200, SERIAL_8N1, GPS_RX_PIN, -1);
+    if (xTaskCreate(gpsTask, "LoraCap GPS", 4096, nullptr, 1, nullptr) != pdPASS)
+        Serial.println("GPS task failed");
     canvas.setColorDepth(8); canvasReady = canvas.createSprite(240, 135) != nullptr;
     drawSplash();
     settingsReady = settings.begin("airputer-ui", false);
@@ -1270,13 +1608,41 @@ void setup()
         for (uint16_t value : REFRESH_INTERVALS)
             if (refreshSeconds == value) validRefresh = true;
         if (!validRefresh) refreshSeconds = 10;
+        if (settings.getBool("homeSet", false))
+        {
+            double latitude = settings.getDouble("homeLat", HOME_LAT);
+            double longitude = settings.getDouble("homeLon", HOME_LON);
+            if (isfinite(latitude) && isfinite(longitude) && latitude >= -90.0 && latitude <= 90.0 &&
+                longitude >= -180.0 && longitude <= 180.0)
+            {
+                homePosition.lat = latitude;
+                homePosition.lon = longitude;
+                homePosition.fromGPS = false;
+                homePositionSet = true;
+            }
+        }
+        for (int i = 0; i < FAVORITE_COUNT; ++i)
+        {
+            char key[12];
+            snprintf(key, sizeof(key), "fav%dSet", i);
+            if (!settings.getBool(key, false)) continue;
+            snprintf(key, sizeof(key), "fav%dLat", i); double latitude = settings.getDouble(key, NAN);
+            snprintf(key, sizeof(key), "fav%dLon", i); double longitude = settings.getDouble(key, NAN);
+            if (isfinite(latitude) && isfinite(longitude) && latitude >= -90.0 && latitude <= 90.0 &&
+                longitude >= -180.0 && longitude <= 180.0)
+            {
+                favoritePlaces[i].lat = latitude;
+                favoritePlaces[i].lon = longitude;
+                favoritePlaces[i].fromGPS = false;
+                favoriteSet[i] = true;
+            }
+        }
     }
+    observerPosition = homePosition;
+    viewPosition = homePosition;
     M5Cardputer.Display.setBrightness(128); lastInputAt = millis();
     OnlineMap::begin(); OnlineMap::request(viewPosition.lat, viewPosition.lon, radiusNM);
     OnlineMap::setEnabled(!outlineMode);
-    gpsSerial.setRxBufferSize(2048); gpsSerial.begin(115200, SERIAL_8N1, GPS_RX_PIN, -1);
-    if (xTaskCreate(gpsTask, "LoraCap GPS", 4096, nullptr, 1, nullptr) != pdPASS)
-        Serial.println("GPS task failed; using Poprad");
     if (xTaskCreate(networkTask, "ADSB network", 12288, nullptr, 1, &networkHandle) != pdPASS)
         strlcpy(statusText, "Network task failed", sizeof(statusText));
     drawUI();
@@ -1285,12 +1651,34 @@ void setup()
 void loop()
 {
     M5Cardputer.update();
-    observerPosition = readPosition();
-    if (followGPS) viewPosition = observerPosition;
+    Position currentPosition = readPosition();
+    if (currentPosition.fromGPS)
+    {
+        observerPosition = currentPosition;
+        lastGpsView = currentPosition;
+        lastGpsViewValid = true;
+    }
+    else if (lastGpsViewValid)
+        observerPosition = lastGpsView;
+    else
+        observerPosition = currentPosition;
+    if (followGPS)
+    {
+        viewPosition = observerPosition;
+    }
     bool changed = applyNetworkResult();
     changed |= applySquawkResult();
     changed |= applyRouteResult();
     changed |= applyPhotoResult();
+    if (trackingSquawk7500 && trackedSquawkLive)
+        for (int i = 0; i < squawkRadar.count; ++i)
+            if (strcmp(squawkRadar.aircraft[i].hex, trackedSquawkHex) == 0)
+            {
+                Position predicted = displayedPosition(squawkRadar.aircraft[i], squawkLastSuccess);
+                viewPosition.lat = predicted.lat; viewPosition.lon = predicted.lon;
+                viewPosition.fromGPS = false;
+                break;
+            }
     char selectedSSID[33] = {};
     if (wifiView.count && wifiRow >= 0 && wifiRow < wifiView.count)
         strlcpy(selectedSSID, wifiView.networks[wifiRow].ssid, sizeof(selectedSSID));
@@ -1332,6 +1720,8 @@ void loop()
     portEXIT_CRITICAL(&viewMux);
     if (OnlineMap::request(viewPosition.lat, viewPosition.lon, radiusNM)) wakeNetwork();
     static uint32_t lastDraw = 0;
-    if (changed || millis() - lastDraw >= (textScrolling ? 40U : 1000U)) { lastDraw = millis(); drawUI(); }
+    uint32_t frameInterval = textScrolling ? 40U :
+        (uiScreen == UiScreen::Map && mapHasMovingAircraft() ? LIVE_MAP_FRAME_MS : 1000U);
+    if (changed || millis() - lastDraw >= frameInterval) { lastDraw = millis(); drawUI(); }
     delay(20);
 }
