@@ -27,6 +27,7 @@ constexpr float MAX_POSITION_PREDICTION_SECONDS = 60.0f;
 constexpr uint32_t LIVE_MAP_FRAME_MS = 250;
 constexpr uint32_t LONG_PRESS_MS = 800;
 constexpr int FAVORITE_COUNT = 10;
+constexpr size_t AIRCRAFT_JSON_OBJECT_BYTES = 4096;
 constexpr char API_USER_AGENT[] = "AirPuter/1.0";
 constexpr char PHOTO_USER_AGENT[] = "AirPuter/1.0 (+https://ko-fi.com/lukaslukee)";
 constexpr char FIRMWARE_VERSION[] = "AirPuter " AIRPUTER_VERSION;
@@ -98,6 +99,7 @@ PhotoRequest photoRequest;
 PhotoResult photoInbox;
 uint32_t nextPhotoId = 0, consumedPhotoId = 0, photoInboxVersion = 0, photoAppliedVersion = 0;
 uint8_t photoData[MAX_PHOTO_BYTES] = {};
+char aircraftJsonObject[AIRCRAFT_JSON_OBJECT_BYTES] = {};
 char statusText[64] = "Connecting WiFi";
 M5Canvas canvas(&M5Cardputer.Display);
 bool canvasReady = false, followGPS = true, outlineMode = true;
@@ -257,7 +259,51 @@ void gpsTask(void*)
     }
 }
 
-int peekJsonCharacter(WiFiClient& stream)
+class BufferedHttpStream : public Stream {
+public:
+    BufferedHttpStream(WiFiClient& source, size_t contentLength)
+        : source_(source), remaining_(contentLength) {}
+
+    int available() override
+    {
+        return int(buffered_ - position_) + source_.available();
+    }
+
+    int read() override
+    {
+        if (position_ >= buffered_ && !refill()) return -1;
+        ++delivered_;
+        return buffer_[position_++];
+    }
+
+    int peek() override
+    {
+        if (position_ >= buffered_ && !refill()) return -1;
+        return buffer_[position_];
+    }
+
+    void flush() override {}
+    size_t write(uint8_t) override { return 0; }
+    size_t delivered() const { return delivered_; }
+    size_t remaining() const { return remaining_ + buffered_ - position_; }
+
+private:
+    bool refill()
+    {
+        position_ = buffered_ = 0;
+        if (!remaining_) return false;
+        size_t requested = std::min(remaining_, sizeof(buffer_));
+        buffered_ = source_.readBytes(reinterpret_cast<char*>(buffer_), requested);
+        remaining_ -= buffered_;
+        return buffered_ != 0;
+    }
+
+    WiFiClient& source_;
+    uint8_t buffer_[1024] = {};
+    size_t position_ = 0, buffered_ = 0, remaining_ = 0, delivered_ = 0;
+};
+
+int peekJsonCharacter(Stream& stream)
 {
     uint32_t started = millis();
     while (millis() - started < 10000)
@@ -270,7 +316,38 @@ int peekJsonCharacter(WiFiClient& stream)
     return -1;
 }
 
-bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
+enum class JsonObjectReadResult { Complete, Interrupted, TooLarge, Invalid };
+
+JsonObjectReadResult readCompleteJsonObject(Stream& stream, char* output, size_t capacity, size_t& length)
+{
+    length = 0;
+    int first = stream.read();
+    if (first != '{') return JsonObjectReadResult::Invalid;
+    output[length++] = '{';
+    int depth = 1;
+    bool inString = false, escaped = false;
+    while (depth > 0)
+    {
+        int value = stream.read();
+        if (value < 0) return JsonObjectReadResult::Interrupted;
+        if (length + 1 >= capacity) return JsonObjectReadResult::TooLarge;
+        char c = char(value);
+        output[length++] = c;
+        if (inString)
+        {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') inString = false;
+        }
+        else if (c == '"') inString = true;
+        else if (c == '{') ++depth;
+        else if (c == '}') --depth;
+    }
+    output[length] = '\0';
+    return JsonObjectReadResult::Complete;
+}
+
+bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
 {
     HeapOperationGuard::Lock heapLock;
     result.count = 0; result.success = false; result.httpCode = 0; result.error[0] = '\0';
@@ -298,6 +375,10 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
     Serial.println("Request: " + url);
     HTTPClient http;
     http.setUserAgent(API_USER_AGENT);
+    // ADSB.lol requires HTTP/1.1, but this response is consumed as a single
+    // forward-only JSON stream. Closing after the response avoids keep-alive
+    // gaps being mistaken for end-of-input by the per-aircraft parser.
+    http.setReuse(false);
     http.setConnectTimeout(10000); http.setTimeout(10000);
     if (!http.begin(url))
     {
@@ -306,7 +387,7 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
     }
     http.addHeader("Accept", "application/json");
     result.httpCode = http.GET();
-    Serial.printf("HTTP code: %d\n", result.httpCode);
+    Serial.printf("HTTP code: %d length=%d\n", result.httpCode, http.getSize());
     if (result.httpCode != HTTP_CODE_OK)
     {
         if (result.httpCode > 0)
@@ -319,8 +400,15 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
         Serial.printf("HTTP response: %s\n", result.error);
         http.end(); return false;
     }
-    WiFiClient& stream = *http.getStreamPtr();
-    stream.setTimeout(10000);
+    int contentLength = http.getSize();
+    if (contentLength <= 0)
+    {
+        strlcpy(result.error, "Missing response length", sizeof(result.error));
+        http.end(); return false;
+    }
+    WiFiClient& networkStream = *http.getStreamPtr();
+    networkStream.setTimeout(15000);
+    BufferedHttpStream stream(networkStream, size_t(contentLength));
     // Parse one aircraft at a time: larger radii cannot fill RAM with the entire response.
     if (!stream.find("\"ac\"") || !stream.find("["))
     {
@@ -348,10 +436,28 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
             strlcpy(result.error, "Invalid aircraft JSON", sizeof(result.error));
             http.end(); return false;
         }
-        DeserializationError error = deserializeJson(document, stream, DeserializationOption::Filter(filter));
+        size_t objectLength = 0;
+        JsonObjectReadResult readResult = readCompleteJsonObject(
+            stream, aircraftJsonObject, sizeof(aircraftJsonObject), objectLength);
+        if (readResult != JsonObjectReadResult::Complete)
+        {
+            const char* message = readResult == JsonObjectReadResult::Interrupted ? "Aircraft transfer interrupted" :
+                                  readResult == JsonObjectReadResult::TooLarge ? "Aircraft object too large" :
+                                  "Invalid aircraft object";
+            strlcpy(result.error, message, sizeof(result.error));
+            Serial.printf("%s after %u response bytes (partial object %u bytes)\n", message,
+                          unsigned(stream.delivered()), unsigned(objectLength));
+            http.end(); return false;
+        }
+        DeserializationError error = deserializeJson(document, aircraftJsonObject, objectLength,
+                                                     DeserializationOption::Filter(filter));
         if (error)
         {
-            strlcpy(result.error, error.c_str(), sizeof(result.error));
+            // The framing scanner only submits a brace-balanced complete object,
+            // so parser errors describe invalid provider data, never a partial TLS read.
+            snprintf(result.error, sizeof(result.error), "Invalid aircraft object: %s", error.c_str());
+            Serial.printf("Aircraft JSON rejected after %u response bytes: %s\n",
+                          unsigned(stream.delivered()), result.error);
             http.end(); return false;
         }
         JsonObject item = document.as<JsonObject>();
@@ -412,6 +518,20 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
     http.end();
     Serial.printf("Aircraft loaded: %d / %u in view\n", result.count, unsigned(candidates));
     return true;
+}
+
+bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
+{
+    for (int attempt = 1; attempt <= 3; ++attempt)
+    {
+        if (downloadAircraftAttempt(result, squawk7500)) return true;
+        bool interrupted = strcmp(result.error, "Aircraft transfer interrupted") == 0 ||
+                           strcmp(result.error, "Missing aircraft array") == 0;
+        if (!interrupted || attempt == 3) return false;
+        Serial.printf("Aircraft transfer interrupted (attempt %d/3), retrying clean TLS connection\n", attempt);
+        delay(350);
+    }
+    return false;
 }
 
 bool downloadRoute(const RouteRequest& request, RouteResult& result)
