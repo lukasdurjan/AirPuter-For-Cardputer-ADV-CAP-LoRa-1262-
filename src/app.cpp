@@ -395,9 +395,15 @@ bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
     {
         if (result.httpCode > 0)
         {
-            auto* stream = http.getStreamPtr(); stream->setTimeout(1000);
-            size_t n = stream->readBytes(result.error, sizeof(result.error) - 1);
-            result.error[n] = '\0';
+            WiFiClient* errorStream = http.getStreamPtr();
+            if (errorStream && http.getSize() != 0)
+            {
+                errorStream->setTimeout(1000);
+                size_t n = errorStream->readBytes(result.error, sizeof(result.error) - 1);
+                result.error[n] = '\0';
+            }
+            if (!result.error[0])
+                snprintf(result.error, sizeof(result.error), "HTTP %d", result.httpCode);
         }
         else strlcpy(result.error, HTTPClient::errorToString(result.httpCode).c_str(), sizeof(result.error));
         Serial.printf("HTTP response: %s\n", result.error);
