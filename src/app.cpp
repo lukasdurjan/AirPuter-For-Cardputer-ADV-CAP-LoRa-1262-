@@ -298,7 +298,6 @@ bool downloadAircraft(NetworkResult& result, bool squawk7500 = false)
     Serial.println("Request: " + url);
     HTTPClient http;
     http.setUserAgent(API_USER_AGENT);
-    http.useHTTP10(true);
     http.setConnectTimeout(10000); http.setTimeout(10000);
     if (!http.begin(url))
     {
