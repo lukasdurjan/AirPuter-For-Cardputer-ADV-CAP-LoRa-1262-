@@ -28,6 +28,7 @@ constexpr uint32_t LIVE_MAP_FRAME_MS = 250;
 constexpr uint32_t LONG_PRESS_MS = 800;
 constexpr int FAVORITE_COUNT = 10;
 constexpr size_t AIRCRAFT_JSON_OBJECT_BYTES = 4096;
+constexpr size_t AIRCRAFT_NETWORK_BUFFER_BYTES = 1024;
 constexpr char API_USER_AGENT[] = "AirPuter/1.0";
 constexpr char PHOTO_USER_AGENT[] = "AirPuter/1.0 (+https://ko-fi.com/lukaslukee)";
 constexpr char FIRMWARE_VERSION[] = "AirPuter " AIRPUTER_VERSION;
@@ -100,6 +101,7 @@ PhotoResult photoInbox;
 uint32_t nextPhotoId = 0, consumedPhotoId = 0, photoInboxVersion = 0, photoAppliedVersion = 0;
 uint8_t photoData[MAX_PHOTO_BYTES] = {};
 char aircraftJsonObject[AIRCRAFT_JSON_OBJECT_BYTES] = {};
+uint8_t aircraftNetworkBuffer[AIRCRAFT_NETWORK_BUFFER_BYTES] = {};
 char statusText[64] = "Connecting WiFi";
 M5Canvas canvas(&M5Cardputer.Display);
 bool canvasReady = false, followGPS = true, outlineMode = true;
@@ -261,8 +263,8 @@ void gpsTask(void*)
 
 class BufferedHttpStream : public Stream {
 public:
-    BufferedHttpStream(WiFiClient& source, size_t contentLength)
-        : source_(source), remaining_(contentLength) {}
+    BufferedHttpStream(WiFiClient& source, size_t contentLength, uint8_t* buffer, size_t capacity)
+        : source_(source), buffer_(buffer), capacity_(capacity), remaining_(contentLength) {}
 
     int available() override
     {
@@ -292,14 +294,15 @@ private:
     {
         position_ = buffered_ = 0;
         if (!remaining_) return false;
-        size_t requested = std::min(remaining_, sizeof(buffer_));
+        size_t requested = std::min(remaining_, capacity_);
         buffered_ = source_.readBytes(reinterpret_cast<char*>(buffer_), requested);
         remaining_ -= buffered_;
         return buffered_ != 0;
     }
 
     WiFiClient& source_;
-    uint8_t buffer_[1024] = {};
+    uint8_t* buffer_ = nullptr;
+    size_t capacity_ = 0;
     size_t position_ = 0, buffered_ = 0, remaining_ = 0, delivered_ = 0;
 };
 
@@ -408,7 +411,8 @@ bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
     }
     WiFiClient& networkStream = *http.getStreamPtr();
     networkStream.setTimeout(15000);
-    BufferedHttpStream stream(networkStream, size_t(contentLength));
+    BufferedHttpStream stream(networkStream, size_t(contentLength),
+                              aircraftNetworkBuffer, sizeof(aircraftNetworkBuffer));
     // Parse one aircraft at a time: larger radii cannot fill RAM with the entire response.
     if (!stream.find("\"ac\"") || !stream.find("["))
     {
@@ -777,6 +781,8 @@ void networkTask(void*)
         {
             lastAttempt = millis(); attempted = true;
             result.success = downloadAircraft(result);
+            Serial.printf("Network task stack minimum free: %u bytes\n",
+                          unsigned(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
             if (result.httpCode == 429)
             {
                 rateLimitUntil = millis() + rateLimitBackoff;

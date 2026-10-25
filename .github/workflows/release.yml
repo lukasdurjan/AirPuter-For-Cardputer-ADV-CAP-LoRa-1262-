@@ -18,7 +18,9 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Espressif's pinned compiler packages are validated on 24.04. Avoid the
+    # ubuntu-latest migration to Ubuntu 26 breaking otherwise unchanged builds.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out complete history
