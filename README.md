@@ -37,7 +37,7 @@ AirPuter shows nearby aircraft directly on the Cardputer display using live ADS-
 
 ## Features
 
-- Live nearby-aircraft tracking using the ADSB.lol API
+- Live nearby-aircraft tracking using the ADSB.fi open data API
 - OpenStreetMap raster map with aircraft position and track
 - Lightweight outline-map mode with country outlines and city labels
 - Map pan and 5 / 10 / 25 / 50 / 100 / 200 NM zoom levels
@@ -90,9 +90,9 @@ The flight list follows the current map viewport and refreshes with incoming air
 
 ### API rate limits (HTTP 429)
 
-HTTP 429 ("Too Many Requests") means ADSB.lol has temporarily limited requests. The response itself is a server-side rate limit, not an AirPuter crash or a map-rendering bug. ADSB.lol uses dynamic limits based on server load, so a refresh interval that works normally can occasionally be rate-limited. See the [ADSB.lol API documentation](https://github.com/adsblol/api/blob/main/README.md#rate-limits).
+Live aircraft positions use the [ADSB.fi open data API](https://github.com/adsbfi/opendata), whose public limit is one request per second. AirPuter enforces at least 1.1 seconds between all nearby-aircraft and SQUAWK7500 requests, while the selectable 10-30 second refresh interval controls each feed independently.
 
-AirPuter automatically pauses both nearby-aircraft and SQUAWK7500 requests for 60 seconds after a 429. Further 429 responses extend the shared pause to 120, 240 and at most 300 seconds. A successful aircraft response resets the next backoff to 60 seconds. The selected Refresh Interval stays saved and unchanged.
+If the server nevertheless returns HTTP 429 ("Too Many Requests"), AirPuter pauses both feeds for the server's `Retry-After` interval. If that header is unavailable, it uses a shared 60-second pause; repeated 429 responses extend the fallback pause to 120, 240 and at most 300 seconds. A successful aircraft response resets the fallback. The selected Refresh Interval stays saved and unchanged.
 
 During this pause, the last successfully received aircraft data remains available. Moving positions continue to be estimated for at most 60 seconds from the last real update, then stop until fresh data arrives. The nearby-aircraft status shows "Rate limited - automatic pause" after a nearby request receives 429. Zooming or panning does not bypass the pause or trigger an early ADS-B request. Updates resume automatically; a restart is unnecessary. Choosing a longer Refresh Interval can reduce request pressure. An actual device restart is a separate fault and should not be treated as normal rate-limit behavior.
 
@@ -187,7 +187,7 @@ const char* WIFI_PASS = "";
 
 ## Data and map sources
 
-Aircraft data and route information are obtained from **ADSB.lol**. Raster map tiles are provided by **OpenStreetMap**.
+Live aircraft data is provided by **[ADSB.fi](https://adsb.fi/)** for personal, non-commercial use. Route information is obtained from **ADSB.lol**. Raster map tiles are provided by **OpenStreetMap**.
 
 Map data © OpenStreetMap contributors. See `MAP_SOURCES.md` for map-source and attribution details.
 

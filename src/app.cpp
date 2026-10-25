@@ -29,6 +29,7 @@ constexpr uint32_t LONG_PRESS_MS = 800;
 constexpr int FAVORITE_COUNT = 10;
 constexpr size_t AIRCRAFT_JSON_OBJECT_BYTES = 4096;
 constexpr size_t AIRCRAFT_NETWORK_BUFFER_BYTES = 1024;
+constexpr uint32_t AIRCRAFT_API_MIN_SPACING_MS = 1100;
 constexpr char API_USER_AGENT[] = "AirPuter/1.0";
 constexpr char PHOTO_USER_AGENT[] = "AirPuter/1.0 (+https://ko-fi.com/lukaslukee)";
 constexpr char FIRMWARE_VERSION[] = "AirPuter " AIRPUTER_VERSION;
@@ -38,6 +39,7 @@ struct NetworkResult {
     Position center;
     Aircraft aircraft[MAX_AIRCRAFT];
     int count = 0, httpCode = 0;
+    uint32_t retryAfterMs = 0;
     bool success = false;
     char error[128] = {};
 };
@@ -263,8 +265,9 @@ void gpsTask(void*)
 
 class BufferedHttpStream : public Stream {
 public:
-    BufferedHttpStream(WiFiClient& source, size_t contentLength, uint8_t* buffer, size_t capacity)
-        : source_(source), buffer_(buffer), capacity_(capacity), remaining_(contentLength) {}
+    BufferedHttpStream(WiFiClient& source, int contentLength, uint8_t* buffer, size_t capacity)
+        : source_(source), buffer_(buffer), capacity_(capacity),
+          lengthKnown_(contentLength >= 0), remaining_(contentLength >= 0 ? size_t(contentLength) : 0) {}
 
     int available() override
     {
@@ -287,22 +290,23 @@ public:
     void flush() override {}
     size_t write(uint8_t) override { return 0; }
     size_t delivered() const { return delivered_; }
-    size_t remaining() const { return remaining_ + buffered_ - position_; }
+    size_t remaining() const { return lengthKnown_ ? remaining_ + buffered_ - position_ : 0; }
 
 private:
     bool refill()
     {
         position_ = buffered_ = 0;
-        if (!remaining_) return false;
-        size_t requested = std::min(remaining_, capacity_);
+        if (lengthKnown_ && !remaining_) return false;
+        size_t requested = lengthKnown_ ? std::min(remaining_, capacity_) : capacity_;
         buffered_ = source_.readBytes(reinterpret_cast<char*>(buffer_), requested);
-        remaining_ -= buffered_;
+        if (lengthKnown_) remaining_ -= buffered_;
         return buffered_ != 0;
     }
 
     WiFiClient& source_;
     uint8_t* buffer_ = nullptr;
     size_t capacity_ = 0;
+    bool lengthKnown_ = true;
     size_t position_ = 0, buffered_ = 0, remaining_ = 0, delivered_ = 0;
 };
 
@@ -353,7 +357,8 @@ JsonObjectReadResult readCompleteJsonObject(Stream& stream, char* output, size_t
 bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
 {
     HeapOperationGuard::Lock heapLock;
-    result.count = 0; result.success = false; result.httpCode = 0; result.error[0] = '\0';
+    result.count = 0; result.success = false; result.httpCode = 0;
+    result.retryAfterMs = 0; result.error[0] = '\0';
     result.center = readPosition();
     portENTER_CRITICAL(&viewMux);
     int requestRadius = radiusNM;
@@ -372,15 +377,15 @@ bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
             }
         requestRadius = int(std::ceil(coverage)) + 1;
     }
-    String url = squawk7500 ? "https://api.adsb.lol/v2/sqk/7500" :
-        "https://api.adsb.lol/v2/lat/" + String(result.center.lat, 5) +
+    String url = squawk7500 ? "https://opendata.adsb.fi/api/v2/sqk/7500" :
+        "https://opendata.adsb.fi/api/v3/lat/" + String(result.center.lat, 5) +
         "/lon/" + String(result.center.lon, 5) + "/dist/" + String(requestRadius);
     Serial.println("Request: " + url);
     HTTPClient http;
     http.setUserAgent(API_USER_AGENT);
-    // ADSB.lol requires HTTP/1.1, but this response is consumed as a single
-    // forward-only JSON stream. Closing after the response avoids keep-alive
-    // gaps being mistaken for end-of-input by the per-aircraft parser.
+    // HTTP/1.0 asks Cloudflare for a close-delimited response instead of chunked
+    // transfer encoding. The parser consumes the JSON as one forward-only stream.
+    http.useHTTP10(true);
     http.setReuse(false);
     http.setConnectTimeout(10000); http.setTimeout(10000);
     if (!http.begin(url))
@@ -389,8 +394,18 @@ bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
         return false;
     }
     http.addHeader("Accept", "application/json");
+    const char* responseHeaders[] = {"Retry-After"};
+    http.collectHeaders(responseHeaders, 1);
     result.httpCode = http.GET();
     Serial.printf("HTTP code: %d length=%d\n", result.httpCode, http.getSize());
+    if (result.httpCode == 429)
+    {
+        String retryAfter = http.header("Retry-After");
+        char* end = nullptr;
+        unsigned long seconds = strtoul(retryAfter.c_str(), &end, 10);
+        if (end && end != retryAfter.c_str() && *end == '\0' && seconds > 0)
+            result.retryAfterMs = uint32_t(std::min<unsigned long>(seconds, 86400UL) * 1000UL);
+    }
     if (result.httpCode != HTTP_CODE_OK)
     {
         if (result.httpCode > 0)
@@ -410,14 +425,9 @@ bool downloadAircraftAttempt(NetworkResult& result, bool squawk7500)
         http.end(); return false;
     }
     int contentLength = http.getSize();
-    if (contentLength <= 0)
-    {
-        strlcpy(result.error, "Missing response length", sizeof(result.error));
-        http.end(); return false;
-    }
     WiFiClient& networkStream = *http.getStreamPtr();
     networkStream.setTimeout(15000);
-    BufferedHttpStream stream(networkStream, size_t(contentLength),
+    BufferedHttpStream stream(networkStream, contentLength,
                               aircraftNetworkBuffer, sizeof(aircraftNetworkBuffer));
     // Parse one aircraft at a time: larger radii cannot fill RAM with the entire response.
     if (!stream.find("\"ac\"") || !stream.find("["))
@@ -741,6 +751,7 @@ void networkTask(void*)
     bool squawkAttempted = false;
     uint32_t lastAttempt = 0;
     uint32_t lastSquawkAttempt = 0;
+    uint32_t lastAircraftRequest = 0;
     uint32_t rateLimitUntil = 0;
     uint32_t rateLimitBackoff = 60000;
     static NetworkResult result; // Large buffers never occupy the worker stack.
@@ -783,15 +794,19 @@ void networkTask(void*)
         uint32_t elapsed = millis() - lastAttempt;
         bool rateLimited = int32_t(millis() - rateLimitUntil) < 0;
         uint32_t refreshMs = uint32_t(currentRefreshSeconds) * 1000;
-        if (!rateLimited && (!attempted || elapsed >= refreshMs))
+        bool apiSlotReady = !lastAircraftRequest ||
+                            millis() - lastAircraftRequest >= AIRCRAFT_API_MIN_SPACING_MS;
+        if (!rateLimited && apiSlotReady && (!attempted || elapsed >= refreshMs))
         {
-            lastAttempt = millis(); attempted = true;
+            lastAttempt = lastAircraftRequest = millis(); attempted = true;
             result.success = downloadAircraft(result);
             Serial.printf("Network task stack minimum free: %u bytes\n",
                           unsigned(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
             if (result.httpCode == 429)
             {
-                rateLimitUntil = millis() + rateLimitBackoff;
+                uint32_t pause = result.retryAfterMs ? result.retryAfterMs : rateLimitBackoff;
+                rateLimitUntil = millis() + pause;
+                Serial.printf("Aircraft API rate limited; pausing %lus\n", pause / 1000);
                 rateLimitBackoff = std::min<uint32_t>(rateLimitBackoff * 2, 300000);
             }
             else if (result.success)
@@ -802,15 +817,19 @@ void networkTask(void*)
         }
         bool showSquawk = uiScreen == UiScreen::Squawk7500 || trackingSquawk7500;
         rateLimited = int32_t(millis() - rateLimitUntil) < 0;
-        if (showSquawk && !rateLimited &&
+        apiSlotReady = !lastAircraftRequest ||
+                       millis() - lastAircraftRequest >= AIRCRAFT_API_MIN_SPACING_MS;
+        if (showSquawk && !rateLimited && apiSlotReady &&
             (!squawkAttempted || millis() - lastSquawkAttempt >= refreshMs))
         {
-            lastSquawkAttempt = millis(); squawkAttempted = true;
+            lastSquawkAttempt = lastAircraftRequest = millis(); squawkAttempted = true;
             static NetworkResult squawkResult;
             squawkResult.success = downloadAircraft(squawkResult, true);
             if (squawkResult.httpCode == 429)
             {
-                rateLimitUntil = millis() + rateLimitBackoff;
+                uint32_t pause = squawkResult.retryAfterMs ? squawkResult.retryAfterMs : rateLimitBackoff;
+                rateLimitUntil = millis() + pause;
+                Serial.printf("Aircraft API rate limited; pausing %lus\n", pause / 1000);
                 rateLimitBackoff = std::min<uint32_t>(rateLimitBackoff * 2, 300000);
             }
             else if (squawkResult.success)
